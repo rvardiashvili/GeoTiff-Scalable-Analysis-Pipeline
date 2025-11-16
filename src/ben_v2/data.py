@@ -29,8 +29,8 @@ def _find_band_path(tile_folder: Path, band_name: str) -> Path | None:
     """Finds the path for a given band in the tile folder (supports .jp2 and .tif)."""
     # NOTE: This function is safe because it only runs once in the main process during init.
     for ext in ['.jp2','.tif']:
-        # Assuming filename structure is like S2A_MSIL1C_..._B02.jp2 or similar
-        candidate = next(tile_folder.glob(f"*{band_name}*{ext}"), None)
+        # Use rglob for recursive search
+        candidate = next(tile_folder.rglob(f"*{band_name}*{ext}"), None)
         if candidate:
             return candidate
     return None

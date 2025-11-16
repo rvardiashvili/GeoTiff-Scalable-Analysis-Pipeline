@@ -31,19 +31,15 @@ PROB_COMPRESS = "lzw"
 # ------------------------------------------------------------
 def _find_band_path(tile_folder: Path, band_name: str) -> Path | None:
     for ext in ['.jp2','.tif']:
-        candidate = next(tile_folder.glob(f"*{band_name}*{ext}"), None)
+        candidate = next(tile_folder.rglob(f"*{band_name}*{ext}"), None)
         if candidate:
             return candidate
     return None
 
 # ------------------------------------------------------------
-def accumulate_probs(results: np.ndarray, coords: List[Tuple[int, int]], H: int, W: int, patch_size: int, n_classes: int) -> np.ndarray:
+def accumulate_probs(results: np.ndarray, coords: List[Tuple[int, int]], H: int, W: int, patch_size: int, n_classes: int, weight_mask: np.ndarray, weight_mask_count: np.ndarray) -> np.ndarray:
     avg = np.zeros((H, W, n_classes), dtype=np.float32)
     count = np.zeros((H, W, 1), dtype=np.float32)
-    window_2d = np.outer(np.sin(np.linspace(0, np.pi, patch_size))**2,
-                         np.sin(np.linspace(0, np.pi, patch_size))**2).astype(np.float32)
-    weight_mask = np.tile(window_2d[:,:,np.newaxis], (1, 1, n_classes))
-    weight_mask_count = np.tile(window_2d[:,:,np.newaxis], (1, 1, 1))
     for i, (r0, c0) in enumerate(coords):
         prob = results[i]
         weighted_prob = prob[np.newaxis, np.newaxis, :] * weight_mask
@@ -54,7 +50,7 @@ def accumulate_probs(results: np.ndarray, coords: List[Tuple[int, int]], H: int,
     return avg
 
 # ------------------------------------------------------------
-def main(tile_folder: str, crop_limit=None, output_directory: str | None = None, extra_data_generators: List[Callable] | None = None):
+def main(tile_folder: str, crop_limit=None, output_directory: str | None = None, extra_data_generators: List[Callable] | None = None, model=None):
     t0 = time.time()
     tile = Path(tile_folder)
     # Ensure output_directory is used correctly
@@ -142,7 +138,15 @@ def main(tile_folder: str, crop_limit=None, output_directory: str | None = None,
     with open(out_path / f"{tile.name}_classmap.json", "w") as f:
         json.dump(class_map_data, f, indent=2)
 
-    model = BigEarthNetv2_0_ImageClassifier.from_pretrained(REPO_ID).to(DEVICE).eval()
+    if model is None:
+        model = BigEarthNetv2_0_ImageClassifier.from_pretrained(REPO_ID).to(DEVICE).eval()
+
+    # --- Pre-calculate weighting masks ---
+    n_classes = len(NEW_LABELS)
+    window_2d = np.outer(np.sin(np.linspace(0, np.pi, PATCH_SIZE))**2,
+                         np.sin(np.linspace(0, np.pi, PATCH_SIZE))**2).astype(np.float32)
+    weight_mask = np.tile(window_2d[:,:,np.newaxis], (1, 1, n_classes))
+    weight_mask_count = np.tile(window_2d[:,:,np.newaxis], (1, 1, 1))
 
     result_queue = queue.Queue(maxsize=2)
     stop_signal = object()
@@ -150,18 +154,18 @@ def main(tile_folder: str, crop_limit=None, output_directory: str | None = None,
     mosaic_pbar = tqdm(total=total_chunks, desc="Writing", position=1)
     fetch_pbar  = tqdm(total=total_chunks, desc="Inference", position=0)
 
-    def mosaicking_worker(dst_class, dst_conf=None, dst_probs=None, dst_entropy=None, dst_gap=None, extra_data_generators=None):
+    def mosaicking_worker(dst_class, dst_conf=None, dst_probs=None, dst_entropy=None, dst_gap=None, extra_data_generators=None, weight_mask=None, weight_mask_count=None):
         try:
             while True:
                 item = result_queue.get()
                 if item is stop_signal:
                     result_queue.task_done()
                     break
-                (results, coords, H_crop, W_crop, patch_size, n_classes,
+                (results, coords, H_crop, W_crop, patch_size, n_classes_runtime,
                  c_start, r_start, W_chunk, H_chunk) = item
                 try:
                     # Accumulate probabilities
-                    avg = accumulate_probs(results, coords, H_crop, W_crop, patch_size, n_classes)
+                    avg = accumulate_probs(results, coords, H_crop, W_crop, patch_size, n_classes_runtime, weight_mask, weight_mask_count)
                     
                     # Calculate outputs
                     dominant_idx = np.argmax(avg, axis=2).astype(np.uint8)
@@ -221,7 +225,7 @@ def main(tile_folder: str, crop_limit=None, output_directory: str | None = None,
 
         worker_thread = threading.Thread(
             target=mosaicking_worker,
-            args=(dst_class, dst_conf, dst_probs, dst_entropy, dst_gap, extra_data_generators),
+            args=(dst_class, dst_conf, dst_probs, dst_entropy, dst_gap, extra_data_generators, weight_mask, weight_mask_count),
             daemon=True
         )
         worker_thread.start()
@@ -268,28 +272,6 @@ def main(tile_folder: str, crop_limit=None, output_directory: str | None = None,
         if dst_gap: dst_gap.close()
         if dst_probs: dst_probs.close()
         fetch_pbar.close(); mosaic_pbar.close()
-
-    print(f"\n✅ Finished in {time.time()-t0:.2f}s")
-    print(f"Class map: {out_class_path}")
-    print(f"Max prob:  {out_conf_path}")
-    if SAVE_ENTROPY: print(f"Entropy:  {out_entropy_path}")
-    if SAVE_GAP: print(f"Gap:       {out_gap_path}")
-    if SAVE_FULL_PROBS: print(f"Full probs: {out_prob_path}")
-    if SAVE_PREVIEW_IMAGE:
-        # Need to re-open the file as it was closed in the worker thread
-        try:
-            with rasterio.open(out_class_path) as src:
-                class_mask = src.read(1)
-                # Calling the new, correctly imported function
-                save_color_mask_preview(
-                    class_mask, 
-                    out_path / "preview.png", 
-                    downscale_factor=PREVIEW_DOWNSCALE_FACTOR
-                )
-        except Exception as e:
-            print(f"❌ Error during final preview generation: {e}")
-
-    fetch_pbar.close(); mosaic_pbar.close()
 
     print(f"\n✅ Finished in {time.time()-t0:.2f}s")
     print(f"Class map: {out_class_path}")

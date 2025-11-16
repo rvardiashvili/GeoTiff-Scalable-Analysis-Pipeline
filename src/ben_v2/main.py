@@ -12,7 +12,7 @@ from . import config
 from .process import main as segmentator_main
 from . import extra_generators
 
-def main(TILE_FOLDER: str, OUTPUT_FOLDER: str):
+def main(TILE_FOLDER: str, OUTPUT_FOLDER: str, model=None):
     """
     Orchestrates the scalable analysis of a single input scene.
     """
@@ -41,10 +41,3 @@ def main(TILE_FOLDER: str, OUTPUT_FOLDER: str):
     print("\n--- Pipeline Complete ---")
     print(f"Total Wall Time: {total_time:.2f} seconds")
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Run BigEarthNetv2.0 segmentation pipeline.')
-    parser.add_argument('--tile_folder', type=str, required=True, help='Path to the Sentinel-2 tile folder.')
-    parser.add_argument('--output_folder', type=str, required=True, help='Path to the output folder.')
-    args = parser.parse_args()
-
-    main(args.tile_folder, args.output_folder)
