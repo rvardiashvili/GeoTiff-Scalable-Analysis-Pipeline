@@ -126,6 +126,26 @@ This will process all tile subdirectories found in `--input_dir`, save the resul
 
 
 
+### 3. Data Acquisition (Sentinel-1 & Sentinel-2)
+
+
+
+A utility script is provided to search for and download matching pairs of Sentinel-1 and Sentinel-2 imagery from the Copernicus Dataspace Ecosystem.
+
+
+
+```bash
+
+python src/ben_v2/download_sentinel.py
+
+```
+
+
+
+*Note: You will need to configure your Copernicus Dataspace credentials and Area of Interest (AOI) within `src/ben_v2/download_sentinel.py` before running.*
+
+
+
 ### Configuration
 
 
@@ -169,6 +189,10 @@ For each input tile, the pipeline generates the following files in the output di
 -   `preview.png`: A downscaled PNG image of the classification map for a quick preview.
 
 -   (Optional) `*_probs.tif`: A multi-band GeoTIFF containing the full probability distribution for each class for every pixel.
+
+
+
+-   `viewer.html`: A standalone HTML viewer for the single tile, allowing for interactive inspection of the results and legend.
 
 
 

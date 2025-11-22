@@ -11,6 +11,7 @@ import argparse
 from . import config
 from .process import main as segmentator_main
 from . import extra_generators
+from .generate_viewer import generate_single_node_viewer
 
 def main(TILE_FOLDER: str, OUTPUT_FOLDER: str, model=None):
     """
@@ -35,6 +36,9 @@ def main(TILE_FOLDER: str, OUTPUT_FOLDER: str, model=None):
     
     # The segmentator_main function handles all I/O, chunking, inference, and saving.
     segmentator_main(tile_folder=str(tile_path), output_directory=str(output_path), extra_data_generators=[extra_generators.calculate_ndvi])
+
+    # Generate viewer for the single tile
+    generate_single_node_viewer(tile_path.name, str(output_path))
 
     total_time = time.time() - start_time
 

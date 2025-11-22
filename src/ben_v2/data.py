@@ -16,8 +16,11 @@ from torch.utils.data import Dataset
 import numpy as np 
 from rasterio.enums import Resampling
 import rasterio.warp
+import rasterio.transform
+import rasterio.vrt
 
 from .config import PATCH_SIZE, BANDS, CHUNK_SIZE, USE_SENTINEL_1, PATCH_STRIDE
+from . import data_structure
 
 # --- Constants for Band Reading ---
 # The BANDS list is now directly imported from config.py, which is the single source of truth.
@@ -25,23 +28,86 @@ NUM_BANDS = len(BANDS)
 
 # --- Utility Functions for Chunk Reading ---
 
-def _find_band_path(tile_folder: Path, band_name: str) -> Path | None:
-    """Finds the path for a given band in the tile folder (supports .jp2 and .tif)."""
-    # NOTE: This function is safe because it only runs once in the main process during init.
-    for ext in ['.jp2','.tif']:
-        # Use rglob for recursive search
-        candidate = next(tile_folder.rglob(f"*{band_name}*{ext}"), None)
-        if candidate:
-            return candidate
-    return None
+def _find_band_path(tile_folder: Path, band_name: str, pattern: str) -> Path | None:
+    """Finds the path for a given band in the tile folder using a glob pattern."""
+    
+    # If the provided path is already the .SAFE directory, adjust the pattern
+    if tile_folder.name.endswith('.SAFE'):
+        if 'S2*.SAFE/' in pattern:
+            pattern = pattern.split('S2*.SAFE/')[1]
+        elif 'S1*.SAFE/' in pattern:
+            pattern = pattern.split('S1*.SAFE/')[1]
 
-def _read_all_bands_for_chunk(
+    # Format the pattern with the band name
+    glob_pattern = pattern.format(band_name=band_name)
+    
+    # Use glob to find candidates, searching recursively
+    candidate = next(tile_folder.glob(glob_pattern), None)
+    return candidate
+
+def _read_s1_bands_for_chunk(
     tile_folder: Path,
     r_start: int, 
     c_start: int, 
     W_chunk: int, 
     H_chunk: int
-) -> np.ndarray:
+) -> Tuple[np.ndarray, Any, Any]:
+    """
+    Reads a single chunk (sub-window) from all required Sentinel-1 bands for a tile.
+    It assumes a 10m resolution for S1 bands.
+    
+    Args:
+        tile_folder (Path): The directory containing the Sentinel-1 band files.
+        r_start, c_start (int): Top-left row and column coordinate of the chunk.
+        W_chunk, H_chunk (int): Width and height of the chunk.
+
+    Returns:
+        Tuple[np.ndarray, Any, Any]: The stacked chunk data, CRS, and transform.
+    """
+    band_data_list = []
+    s1_bands = [b for b in BANDS if b in ['VV', 'VH']]
+    s1_crs = None
+    s1_transform = None
+
+    if not s1_bands:
+        return np.array([]), None, None
+
+    for i, band_name in enumerate(s1_bands):
+        band_path = _find_band_path(tile_folder, band_name.lower(), data_structure.S1_BAND_PATTERN)
+        if not band_path:
+            raise FileNotFoundError(f"Missing required S1 band file: {band_name} in {tile_folder} using pattern {data_structure.S1_BAND_PATTERN}")
+
+        with rasterio.open(band_path) as src:
+            if i == 0:
+                if src.crs:
+                    s1_crs = src.crs
+                    s1_transform = src.transform
+                else:
+                    gcps, crs = src.gcps
+                    if gcps:
+                        s1_crs = crs
+                        s1_transform = rasterio.transform.from_gcps(gcps)
+                    else:
+                        # No CRS and no GCPs
+                        s1_crs = None
+                        s1_transform = None
+            
+            window = Window(c_start, r_start, W_chunk, H_chunk)
+            band_data = src.read(1, window=window, boundless=True)
+            band_data_list.append(band_data.astype(np.float32))
+
+    if not band_data_list:
+        return np.array([]), None, None
+
+    return np.stack(band_data_list, axis=0), s1_crs, s1_transform
+
+def _read_s2_bands_for_chunk(
+    tile_folder: Path,
+    r_start: int, 
+    c_start: int, 
+    W_chunk: int, 
+    H_chunk: int
+) -> Tuple[np.ndarray, Any, Any]:
     """
     Reads a single chunk (sub-window) from all required bands for a tile.
     It automatically uses the resolution of 'B02' as the reference and resamples
@@ -53,33 +119,35 @@ def _read_all_bands_for_chunk(
         W_chunk, H_chunk (int): Width and height of the chunk in the reference resolution.
 
     Returns:
-        np.ndarray: The stacked chunk data (C, H_chunk, W_chunk) as float32.
+        Tuple[np.ndarray, Any, Any]: The stacked chunk data, CRS, and transform of the reference band.
     """
     band_data_list = []
-    s2_bands = BANDS
+    s2_bands = [b for b in BANDS if b not in ['VV', 'VH']]
     ref_band_name = 'B02' # As requested, B02 is the reference.
 
-    ref_band_path = _find_band_path(tile_folder, ref_band_name)
+    ref_band_path = _find_band_path(tile_folder, ref_band_name, data_structure.S2_BAND_PATTERN)
     if not ref_band_path:
         # Fallback to the first band in the list if B02 is not present
         if not s2_bands:
             raise ValueError("BANDS list is empty.")
         ref_band_name = s2_bands[0]
-        ref_band_path = _find_band_path(tile_folder, ref_band_name)
+        ref_band_path = _find_band_path(tile_folder, ref_band_name, data_structure.S2_BAND_PATTERN)
         if not ref_band_path:
-             raise FileNotFoundError(f"Missing reference band file for {ref_band_name} in {tile_folder}")
+             raise FileNotFoundError(f"Missing reference band file for {ref_band_name} in {tile_folder} using pattern {data_structure.S2_BAND_PATTERN}")
         print(f"⚠️  'B02' not found. Using '{ref_band_name}' as the reference for resolution.")
 
 
     with rasterio.open(ref_band_path) as ref_src:
         ref_res = ref_src.res
+        ref_crs = ref_src.crs
+        ref_transform = ref_src.transform
 
     target_shape = (H_chunk, W_chunk)
 
     for band_name in s2_bands:
-        band_path = _find_band_path(tile_folder, band_name)
+        band_path = _find_band_path(tile_folder, band_name, data_structure.S2_BAND_PATTERN)
         if not band_path:
-            raise FileNotFoundError(f"Missing required band file: {band_name} in {tile_folder}")
+            raise FileNotFoundError(f"Missing required band file: {band_name} in {tile_folder} using pattern {data_structure.S2_BAND_PATTERN}")
 
         with rasterio.open(band_path) as src:
             # If resolutions match, we can read the window directly without resampling.
@@ -112,7 +180,7 @@ def _read_all_bands_for_chunk(
                 )
             band_data_list.append(band_data.astype(np.float32))
 
-    return np.stack(band_data_list, axis=0)
+    return np.stack(band_data_list, axis=0), ref_crs, ref_transform
 
 # --- Main Public Functions ---
 
@@ -120,8 +188,38 @@ def read_chunk_data(tile_folder: Path, BANDS: List[str], r_start: int, c_start: 
     """
     Public wrapper to read a single chunk of Sentinel-2 data.
     """
-    # NOTE: We use the local _read_all_bands_for_chunk which references the BANDS list defined above
-    return _read_all_bands_for_chunk(tile_folder, r_start, c_start, W_chunk, H_chunk)
+    s2_data, s2_crs, s2_transform = _read_s2_bands_for_chunk(tile_folder, r_start, c_start, W_chunk, H_chunk)
+    
+    if USE_SENTINEL_1:
+        s1_data, s1_crs, s1_transform = _read_s1_bands_for_chunk(tile_folder, r_start, c_start, W_chunk, H_chunk)
+        
+        if s1_data.size == 0:
+            return s2_data
+
+        if s1_crs is None:
+            raise ValueError("Sentinel-1 data is missing CRS information and cannot be reprojected.")
+
+        # If CRS or transform do not match, reproject S1 data to S2's grid.
+        if s1_crs != s2_crs or not rasterio.transform.almost_equals(s1_transform, s2_transform):
+            print(f"⚠️ CRS or transform mismatch. Reprojecting S1 data to match S2.")
+            
+            # Create an empty array for the reprojected data
+            reprojected_s1_data = np.empty((s1_data.shape[0], s2_data.shape[1], s2_data.shape[2]), dtype=np.float32)
+            
+            rasterio.warp.reproject(
+                source=s1_data,
+                destination=reprojected_s1_data,
+                src_transform=s1_transform,
+                src_crs=s1_crs,
+                dst_transform=s2_transform,
+                dst_crs=s2_crs,
+                resampling=Resampling.nearest
+            )
+            s1_data = reprojected_s1_data
+
+        return np.concatenate([s2_data, s1_data], axis=0)
+    else:
+        return s2_data
 
 
 def cut_into_patches(img_chunk: np.ndarray, PATCH_SIZE: int, stride: int = PATCH_STRIDE) -> Tuple[np.ndarray, List[Tuple[int, int]], int, int, int]:

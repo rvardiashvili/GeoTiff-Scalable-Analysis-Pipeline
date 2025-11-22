@@ -14,7 +14,7 @@ def generate_viewer(output_dir):
         path = os.path.join(output_dir, d)
         if os.path.isdir(path):
             # A simple check to see if it's a tile directory
-            if any(f.endswith('_classmap.json') for f in os.listdir(os.path.join(path,d))):
+            if any(f.endswith('_classmap.json') for f in os.listdir(path)):
                 tile_dirs.append(d)
 
     print(f"Found tile directories: {tile_dirs}")
@@ -90,14 +90,14 @@ def generate_viewer(output_dir):
                 tileElement.innerHTML = `<h3>${{dir}}</h3>`;
 
                 const previewImg = document.createElement('img');
-                const previewPath = `${{dir}}/${{dir}}/preview.png`;
+                const previewPath = `${{dir}}/preview.png`;
                 previewImg.src = previewPath;
                 previewImg.alt = `Preview for ${{dir}}`;
                 previewImg.onerror = () => {{ previewImg.alt = `Preview not found at ${{previewPath}}`; previewImg.style.display='none'; }};
                 tileElement.appendChild(previewImg);
 
                 const legendElement = document.createElement('div');
-                const classmapPath = `${{dir}}/${{dir}}/${{dir}}_classmap.json`;
+                const classmapPath = `${{dir}}/${{dir}}_classmap.json`;
                 fetch(classmapPath)
                     .then(response => {{
                         if (!response.ok) {{
@@ -112,7 +112,7 @@ def generate_viewer(output_dir):
                                 const color = classmap[label].color_rgb;
                                 legendHtml += `
                                     <div class="legend-item">
-                                        <div class="legend-color" style="background-color: rgb(${{color[0]}}, ${{color[1]}}, ${{color[2]}})"></div>
+                                        <div class="legend-color" style="background-color: rgb(${{color[0]}}, ${{color[1]}}, ${{color[2]}})">.</div>
                                         <span>${{label.replace(/_/g, ' ')}}</span>
                                     </div>`;
                             }}
@@ -138,9 +138,96 @@ def generate_viewer(output_dir):
         f.write(html_content)
     print(f"Viewer generated at: {os.path.abspath(viewer_path)}")
 
+def generate_single_node_viewer(tile_name, output_dir):
+    """
+    Generates an HTML viewer for a single BigEarthNet v2.0 analysis result.
+    """
+    print(f"Generating single node viewer for tile: {tile_name}")
+
+    html_content = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BigEarthNet v2.0 Viewer - {tile_name}</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 2em; background-color: #f9f9f9; color: #333; }}
+        h1 {{ color: #111; }}
+        .tile {{ background-color: #fff; border: 1px solid #ccc; border-radius: 8px; padding: 1.5em; margin-bottom: 2em; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        .tile img {{ max-width: 100%; border-radius: 4px; }}
+        .legend {{ columns: 2; -webkit-columns: 2; -moz-columns: 2; margin-top: 1em; }}
+        .legend-item {{ display: flex; align-items: center; margin-bottom: 8px; }}
+        .legend-color {{ width: 20px; height: 20px; margin-right: 10px; border: 1px solid #000; border-radius: 4px; }}
+    </style>
+</head>
+<body>
+    <h1>BigEarthNet v2.0 Analysis - {tile_name}</h1>
+
+    <div id="tile-container"></div>
+
+    <script>
+        const tileName = "{tile_name}";
+        const container = document.getElementById('tile-container');
+
+        const tileElement = document.createElement('div');
+        tileElement.className = 'tile';
+        
+        const previewImg = document.createElement('img');
+        const previewPath = `preview.png`;
+        previewImg.src = previewPath;
+        previewImg.alt = `Preview for {tile_name}`;
+        previewImg.onerror = () => {{ previewImg.alt = `Preview not found at ${{previewPath}}`; previewImg.style.display='none'; }};
+        tileElement.appendChild(previewImg);
+
+        const legendElement = document.createElement('div');
+        const classmapPath = `{tile_name}_classmap.json`;
+        fetch(classmapPath)
+            .then(response => {{
+                if (!response.ok) {{
+                    throw new Error(`classmap.json not found for {tile_name}`);
+                }}
+                return response.json();
+            }})
+            .then(classmap => {{
+                let legendHtml = '<h4>Legend</h4><div class="legend">';
+                for (const label in classmap) {{
+                    if (label !== 'No_Dominant_Class') {{
+                        const color = classmap[label].color_rgb;
+                        legendHtml += `
+                            <div class="legend-item">
+                                <div class="legend-color" style="background-color: rgb(${{color[0]}}, ${{color[1]}}, ${{color[2]}})"></div>
+                                <span>${{label.replace(/_/g, ' ')}}</span>
+                            </div>`;
+                    }}
+                }}
+                legendHtml += '</div>';
+                legendElement.innerHTML = legendHtml;
+            }})
+            .catch(error => {{
+                legendElement.innerHTML = `<p>${{error.message}}</p>`;
+            }});
+        tileElement.appendChild(legendElement);
+
+        container.appendChild(tileElement);
+    </script>
+</body>
+</html>
+"""
+
+    viewer_path = os.path.join(output_dir, tile_name, 'viewer.html')
+    os.makedirs(os.path.dirname(viewer_path), exist_ok=True)
+    with open(viewer_path, 'w') as f:
+        f.write(html_content)
+    print(f"Viewer generated at: {os.path.abspath(viewer_path)}")
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Generate an HTML viewer for BigEarthNet v2.0 analysis results.')
     parser.add_argument('--output_dir', type=str, default='out', help='Path to the output directory.')
+    parser.add_argument('--tile_name', type=str, help='Name of the tile for single node viewer.')
     args = parser.parse_args()
     
-    generate_viewer(args.output_dir)
+    if args.tile_name:
+        generate_single_node_viewer(args.tile_name, args.output_dir)
+    else:
+        generate_viewer(args.output_dir)

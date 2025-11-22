@@ -23,11 +23,51 @@ The core problem is to perform semantic segmentation on a full, un-patched Senti
 3.  Aggregates patch-level predictions into a seamless, tile-level classification map.
 4.  Generates auxiliary data products to aid in the interpretation and quality assessment of the classification results.
 
-## 2. Methodology and Workflow
+### 2. Methodology and Workflow
+
+
+
+
 
 The pipeline employs a "divide and conquer" strategy, processing the large input tile in a series of stages.
 
-### 2.1. Input Data and Pre-processing
+
+
+
+
+
+
+### 2.1. Data Acquisition
+
+
+
+
+
+A dedicated module (`download_sentinel.py`) handles the acquisition of input data from the Copernicus Dataspace Ecosystem. It is designed to retrieve matching pairs of Sentinel-1 (SAR) and Sentinel-2 (Optical) imagery.
+
+
+
+
+
+
+
+-   **Sentinel-2 Selection:** Filters for products with low cloud coverage (< 10%) within the specified time window and Area of Interest (AOI).
+
+
+
+-   **Sentinel-1 Matching:** For each selected Sentinel-2 product, the system searches for a spatially overlapping Sentinel-1 GRD product acquired within a close temporal window (e.g., +/- 2 days).
+
+
+
+-   **Pairing:** Valid pairs are downloaded and organized into a directory structure suitable for processing.
+
+
+
+
+
+
+
+### 2.2. Input Data and Pre-processing
 
 The pipeline ingests a single Sentinel-2 tile, represented as a folder of individual band files (e.g., `B01.jp2`, `B02.jp2`, etc.). These are typically Top-of-Atmosphere (L1C) or Bottom-of-Atmosphere (L2A) reflectance products.
 
@@ -106,6 +146,20 @@ From the final, aggregated probability map for each chunk, a suite of geospatial
 -   **Prediction Gap (`*_gap.tif`):** This is the difference between the highest and second-highest class probabilities. A small gap suggests that the model found it difficult to distinguish between the top two candidate classes.
 
 -   **Full Probabilities (`*_probs.tif`):** An optional, multi-band GeoTIFF that stores the full probability vector for each pixel. This is a rich data product that allows for more advanced post-processing and analysis.
+
+
+
+
+
+
+
+-   **Single Node Viewer (`viewer.html`):** An interactive HTML dashboard generated for each processed tile. It provides a user-friendly interface to view the classification preview, the legend, and potentially other metrics, facilitating immediate visual inspection without specialized GIS software.
+
+
+
+
+
+
 
 All GeoTIFF outputs are created with tiling and LZW compression to optimize for storage and read performance.
 

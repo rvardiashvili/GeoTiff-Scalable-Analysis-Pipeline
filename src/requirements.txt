@@ -1,0 +1,10 @@
+numpy
+torch
+rasterio
+tqdm
+lightning
+huggingface_hub
+matplotlib
+Pillow
+scipy
+configilm
