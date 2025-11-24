@@ -15,6 +15,12 @@ from configilm.extra.CustomTorchClasses import LinearWarmupCosineAnnealingLR
 from configilm.metrics import get_classification_metric_collection
 from huggingface_hub import PyTorchModelHubMixin
 
+# Monkeypatch ILMConfiguration to satisfy PyTorchModelHubMixin requirements
+if not hasattr(ILMConfiguration, 'items'):
+    def items(self):
+        return self.__dict__.items()
+    ILMConfiguration.items = items
+
 __author__ = "Leonard Hackel - BIFOLD/RSiM TU Berlin"
 
 
@@ -34,6 +40,7 @@ class BigEarthNetv2_0_ImageClassifier(pl.LightningModule, PyTorchModelHubMixin):
             config: ILMConfiguration,
             lr: float = 1e-3,
             warmup: Optional[int] = None,
+            **kwargs
     ):
         super().__init__()
         # If config is a dict (from from_pretrained), convert it to ILMConfiguration

@@ -1,0 +1,13 @@
+defaults:
+  - model: unet_configilm
+  - pipeline: inference_params
+  - data_source: sentinel_2
+  - _self_
+
+input_path: ???  # Path to the input tile folder
+output_path: ??? # Path to the output directory
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null

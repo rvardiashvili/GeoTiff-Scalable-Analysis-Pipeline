@@ -6,7 +6,7 @@ This script now also includes the core functions for reading large data chunks a
 cutting them into smaller patches for inference.
 """
 from pathlib import Path
-from typing import List, Tuple, Dict, Any, Union
+from typing import List, Tuple, Dict, Any, Union, Optional
 from collections import defaultdict
 
 import torch
@@ -18,17 +18,14 @@ from rasterio.enums import Resampling
 import rasterio.warp
 import rasterio.transform
 import rasterio.vrt
+from rasterio.vrt import WarpedVRT
+import re
 
-from .config import PATCH_SIZE, BANDS, CHUNK_SIZE, USE_SENTINEL_1, PATCH_STRIDE
 from . import data_structure
-
-# --- Constants for Band Reading ---
-# The BANDS list is now directly imported from config.py, which is the single source of truth.
-NUM_BANDS = len(BANDS)
 
 # --- Utility Functions for Chunk Reading ---
 
-def _find_band_path(tile_folder: Path, band_name: str, pattern: str) -> Path | None:
+def _find_band_path(tile_folder: Path, band_name: str, pattern: str = data_structure.S2_BAND_PATTERN) -> Path | None:
     """Finds the path for a given band in the tile folder using a glob pattern."""
     
     # If the provided path is already the .SAFE directory, adjust the pattern
@@ -50,254 +47,387 @@ def _read_s1_bands_for_chunk(
     r_start: int, 
     c_start: int, 
     W_chunk: int, 
-    H_chunk: int
+    H_chunk: int,
+    pad_if_needed: bool = False,
+    target_size: Optional[Tuple[int, int]] = None,
+    bands_list: Optional[List[str]] = None,
+    ref_crs: Optional[Any] = None,
+    ref_transform: Optional[Any] = None,
+    ref_size: Optional[Tuple[int, int]] = None
 ) -> Tuple[np.ndarray, Any, Any]:
     """
-    Reads a single chunk (sub-window) from all required Sentinel-1 bands for a tile.
-    It assumes a 10m resolution for S1 bands.
+    Reads a single chunk from S1 bands.
     
-    Args:
-        tile_folder (Path): The directory containing the Sentinel-1 band files.
-        r_start, c_start (int): Top-left row and column coordinate of the chunk.
-        W_chunk, H_chunk (int): Width and height of the chunk.
-
-    Returns:
-        Tuple[np.ndarray, Any, Any]: The stacked chunk data, CRS, and transform.
+    CRITICAL: If ref_crs and ref_transform are provided (usually from S2), 
+    this function explicitly WARPS (Reprojects) the S1 data to match the S2 grid 
+    on-the-fly using a WarpedVRT. This ensures geolocation alignment.
     """
     band_data_list = []
-    s1_bands = [b for b in BANDS if b in ['VV', 'VH']]
+    
+    if bands_list is None:
+        return np.array([]), None, None
+        
+    s1_bands = [b for b in bands_list if b in ['VV', 'VH']]
     s1_crs = None
     s1_transform = None
 
     if not s1_bands:
         return np.array([]), None, None
 
-    for i, band_name in enumerate(s1_bands):
-        band_path = _find_band_path(tile_folder, band_name.lower(), data_structure.S1_BAND_PATTERN)
-        if not band_path:
-            raise FileNotFoundError(f"Missing required S1 band file: {band_name} in {tile_folder} using pattern {data_structure.S1_BAND_PATTERN}")
+    # --- Detect S1 Manifests (for GCP-based alignment) ---
+    # Search strategies for S1 Manifest:
+    # 1. Inside tile_folder (if tile_folder is a container)
+    # 2. Sibling of tile_folder (if tile_folder is the S2 dataset)
+    
+    possible_manifests = []
+    
+    # 1. Look inside current folder
+    possible_manifests.extend(list(tile_folder.glob("S1*.SAFE/manifest.safe")))
+    possible_manifests.extend(list(tile_folder.glob("*/S1*.SAFE/manifest.safe"))) # Nested
+    
+    # 2. Look in parent folder (Sibling)
+    if tile_folder.parent.exists():
+        possible_manifests.extend(list(tile_folder.parent.glob("S1*.SAFE/manifest.safe")))
+        possible_manifests.extend(list(tile_folder.parent.glob("S1*/manifest.safe")))
 
-        with rasterio.open(band_path) as src:
-            if i == 0:
-                if src.crs:
-                    s1_crs = src.crs
-                    s1_transform = src.transform
-                else:
-                    gcps, crs = src.gcps
-                    if gcps:
-                        s1_crs = crs
-                        s1_transform = rasterio.transform.from_gcps(gcps)
+    # Remove duplicates if any
+    possible_manifests = list(set(possible_manifests))
+
+    if not possible_manifests:
+        # Fallback: search for band files directly if no manifest found? 
+        # For now, we rely on manifest for GCPs.
+        pass
+
+    # Iterate over bands
+    for i, band_name in enumerate(s1_bands):
+        # Initialize Full Buffer (Padded with 0s) for this band
+        # We will accumulate data from all S1 sources here (Mosaic)
+        full_band_buffer = np.zeros((H_chunk, W_chunk), dtype=np.float32)
+        
+        # Track if we found ANY valid source for this band
+        found_any_source = False
+
+        # Iterate over all found S1 products (Mosaic Logic)
+        for manifest_path in possible_manifests:
+             src = None
+             using_manifest = False
+             
+             # Try opening via manifest (Subdataset)
+             sd_path = f"SENTINEL1_CALIB:UNCALIB:{manifest_path}:IW_{band_name.upper()}:AMPLITUDE"
+             try:
+                 src = rasterio.open(sd_path)
+                 using_manifest = True
+             except Exception:
+                 # Fallback: try to find the TIFF file near the manifest
+                 # S1 structure: .../measurement/s1a-iw-grd-vv-....tiff
+                 # We search relative to the manifest's parent folder
+                 s1_safe_dir = manifest_path.parent
+                 band_path = _find_band_path(s1_safe_dir, band_name.lower(), data_structure.S1_BAND_PATTERN)
+                 if band_path:
+                     src = rasterio.open(band_path)
+
+             if src is None:
+                 continue # Skip this source if band not found
+             
+             found_any_source = True
+
+             with src:
+                # Strict Requirement: We must have a reference grid (S2) and the source must have georeferencing.
+                if not (ref_crs and ref_transform and ref_size):
+                    raise ValueError("Cannot align S1 data: No reference Sentinel-2 grid provided.")
+
+                # Check Source Georeferencing
+                has_gcps = hasattr(src, 'gcps') and src.gcps and src.gcps[0]
+                
+                if not has_gcps and not src.crs:
+                     print(f"WARNING: S1 Source {manifest_path.parent.name} has NO CRS/GCPs. Skipping.")
+                     continue
+
+                # Calculate Valid Intersection in Target (Reference) Coordinates
+                vrt_w = ref_size[1]
+                vrt_h = ref_size[0]
+
+                valid_c_start = max(0, c_start)
+                valid_r_start = max(0, r_start)
+                valid_c_end = min(c_start + W_chunk, vrt_w)
+                valid_r_end = min(r_start + H_chunk, vrt_h)
+
+                valid_w = valid_c_end - valid_c_start
+                valid_h = valid_r_end - valid_r_start
+
+                if valid_w > 0 and valid_h > 0:
+                    # Allocate buffer for the destination window (Amplitude)
+                    dest_arr = np.zeros((valid_h, valid_w), dtype=np.float32)
+                    
+                    # Calculate Transform for this specific window
+                    dst_window_transform = rasterio.windows.transform(
+                        Window(valid_c_start, valid_r_start, valid_w, valid_h),
+                        ref_transform
+                    )
+
+                    # Prepare arguments for reproject
+                    reproject_kwargs = {
+                        'source': rasterio.band(src, 1),
+                        'destination': dest_arr,
+                        'dst_transform': dst_window_transform,
+                        'dst_crs': ref_crs,
+                        'resampling': Resampling.bilinear,
+                        'dst_nodata': 0
+                    }
+                    
+                    if has_gcps:
+                        reproject_kwargs['gcps'] = src.gcps[0]
+                        reproject_kwargs['src_crs'] = src.gcps[1]
                     else:
-                        # No CRS and no GCPs
-                        s1_crs = None
-                        s1_transform = None
+                        reproject_kwargs['src_transform'] = src.transform
+                        reproject_kwargs['src_crs'] = src.crs
+
+                    # Run Reprojection
+                    try:
+                        rasterio.warp.reproject(**reproject_kwargs)
+                    except Exception as e:
+                        print(f"Error reprojecting S1 source {manifest_path}: {e}")
+                        continue
+                    
+                    # Place Valid Data into a temp buffer for this source
+                    temp_full_buffer = np.zeros((H_chunk, W_chunk), dtype=np.float32)
+                    
+                    dest_r = valid_r_start - r_start
+                    dest_c = valid_c_start - c_start
+                    temp_full_buffer[dest_r:dest_r+valid_h, dest_c:dest_c+valid_w] = dest_arr
+                    
+                    # Accumulate into main buffer (Mosaic Max)
+                    full_band_buffer = np.maximum(full_band_buffer, temp_full_buffer)
+
+        if not found_any_source:
+             raise FileNotFoundError(f"Missing required S1 band file: {band_name} (searched {len(possible_manifests)} manifests)")
+
+        # --- TUNING UPDATE ---
+        # 55.0 was "Safe" (Good water, but dim land/missing urban).
+        # 48.0 is "Aggressive" (Adds +7dB brightness).
+        # This aligns your Land Mean (~ -13) with the Model Mean (~ -7).
+        K_CALIB = 50.0
+
+        band_data_db = (20.0 * np.log10(np.maximum(full_band_buffer, 1e-4))) - K_CALIB
+
+        # --- CLIP UPDATE ---
+        # OLD: np.clip(band_data_db, -50.0, 5.0)  <-- Kills Cities
+        # NEW: np.clip(band_data_db, -50.0, 30.0) <-- Lets Cities Live
+        band_data_db = np.clip(band_data_db, -50.0, 30.0)
+
+        # Apply Reflect Padding if requested (Consistency with S2)
+        vrt_w = ref_size[1]
+        vrt_h = ref_size[0]
+        valid_c_start = max(0, c_start)
+        valid_r_start = max(0, r_start)
+        valid_c_end = min(c_start + W_chunk, vrt_w)
+        valid_r_end = min(r_start + H_chunk, vrt_h)
+        valid_w = valid_c_end - valid_c_start
+        valid_h = valid_r_end - valid_r_start
+        
+        dest_r = valid_r_start - r_start
+        dest_c = valid_c_start - c_start
+        
+        pad_top = dest_r
+        pad_left = dest_c
+        pad_bottom = H_chunk - (dest_r + valid_h)
+        pad_right = W_chunk - (dest_c + valid_w)
+
+        if pad_top > 0 or pad_left > 0 or pad_bottom > 0 or pad_right > 0:
+            # We extract the valid center and reflect-pad it
+            roi = band_data_db[dest_r:dest_r+valid_h, dest_c:dest_c+valid_w]
+            padded_roi = np.pad(roi, ((pad_top, pad_bottom), (pad_left, pad_right)), mode='reflect')
+            band_data_db = padded_roi
             
-            window = Window(c_start, r_start, W_chunk, H_chunk)
-            band_data = src.read(1, window=window, boundless=True)
-            band_data_list.append(band_data.astype(np.float32))
+        band_data_list.append(band_data_db.astype(np.float32))
 
     if not band_data_list:
         return np.array([]), None, None
 
-    return np.stack(band_data_list, axis=0), s1_crs, s1_transform
+    # If we warped, return the reference CRS/Transform as the "current" ones
+    ret_crs = ref_crs if ref_crs else s1_crs
+    ret_transform = ref_transform if ref_transform else s1_transform
+
+    return np.stack(band_data_list, axis=0), ret_crs, ret_transform
 
 def _read_s2_bands_for_chunk(
     tile_folder: Path,
     r_start: int, 
     c_start: int, 
     W_chunk: int, 
-    H_chunk: int
-) -> Tuple[np.ndarray, Any, Any]:
+    H_chunk: int,
+    pad_if_needed: bool = False,
+    target_size: Optional[Tuple[int, int]] = None,
+    bands_list: Optional[List[str]] = None
+) -> Tuple[np.ndarray, Any, Any, Tuple[int, int]]:
     """
     Reads a single chunk (sub-window) from all required bands for a tile.
     It automatically uses the resolution of 'B02' as the reference and resamples
     all other bands to match it on-the-fly.
-    
-    Args:
-        tile_folder (Path): The directory containing the Sentinel-2 band files.
-        r_start, c_start (int): Top-left row and column coordinate of the chunk in the reference resolution.
-        W_chunk, H_chunk (int): Width and height of the chunk in the reference resolution.
-
-    Returns:
-        Tuple[np.ndarray, Any, Any]: The stacked chunk data, CRS, and transform of the reference band.
     """
     band_data_list = []
-    s2_bands = [b for b in BANDS if b not in ['VV', 'VH']]
-    ref_band_name = 'B02' # As requested, B02 is the reference.
+    
+    if bands_list is None:
+         raise ValueError("BANDS list cannot be None.")
+    
+    s2_bands = [b for b in bands_list if b not in ['VV', 'VH']]
+    ref_band_name = 'B02' 
 
     ref_band_path = _find_band_path(tile_folder, ref_band_name, data_structure.S2_BAND_PATTERN)
     if not ref_band_path:
-        # Fallback to the first band in the list if B02 is not present
         if not s2_bands:
             raise ValueError("BANDS list is empty.")
         ref_band_name = s2_bands[0]
         ref_band_path = _find_band_path(tile_folder, ref_band_name, data_structure.S2_BAND_PATTERN)
         if not ref_band_path:
-             raise FileNotFoundError(f"Missing reference band file for {ref_band_name} in {tile_folder} using pattern {data_structure.S2_BAND_PATTERN}")
-        print(f"⚠️  'B02' not found. Using '{ref_band_name}' as the reference for resolution.")
+             raise FileNotFoundError(f"Missing reference band file for {ref_band_name}")
 
-
+    # We keep the reference open to extract global tile info
     with rasterio.open(ref_band_path) as ref_src:
         ref_res = ref_src.res
         ref_crs = ref_src.crs
         ref_transform = ref_src.transform
+        ref_height = ref_src.height
+        ref_width = ref_src.width
+        ref_size = (ref_height, ref_width)
 
-    target_shape = (H_chunk, W_chunk)
-
+    # --- Detect Processing Baseline and Offset ---
+    # Sentinel-2 data after Jan 2022 (PB 04.00) has a radiometric offset of -1000 DN.
+    offset = 0.0
+    match = re.search(r'_N(\d{4})_', tile_folder.name)
+    if match:
+        proc_baseline = int(match.group(1))
+        if proc_baseline >= 400:
+            offset = -1000.0
+    
     for band_name in s2_bands:
         band_path = _find_band_path(tile_folder, band_name, data_structure.S2_BAND_PATTERN)
         if not band_path:
-            raise FileNotFoundError(f"Missing required band file: {band_name} in {tile_folder} using pattern {data_structure.S2_BAND_PATTERN}")
+            raise FileNotFoundError(f"Missing required band file: {band_name}")
 
         with rasterio.open(band_path) as src:
-            # If resolutions match, we can read the window directly without resampling.
-            if src.res == ref_res:
-                window = Window(c_start, r_start, W_chunk, H_chunk)
-                band_data = src.read(1, window=window, boundless=True)
-            # If resolutions differ, we calculate a new window for the source resolution
-            # and then resample the read data to the target shape.
-            else:
-                # Calculate the scaling factor based on resolution difference.
-                scale_x = src.res[0] / ref_res[0]
-                scale_y = src.res[1] / ref_res[1]
+            # Unified logic for both same-res and diff-res bands
+            scale_x = src.res[0] / ref_res[0]
+            scale_y = src.res[1] / ref_res[1]
 
-                # Apply the scaling factor to the window parameters.
-                win_c = c_start / scale_x
-                win_r = r_start / scale_y
-                win_w = W_chunk / scale_x
-                win_h = H_chunk / scale_y
+            target_img_h = int(src.height * scale_y)
+            target_img_w = int(src.width * scale_x)
 
-                # Create the new window for the lower-resolution band.
-                window = Window(round(win_c), round(win_r), round(win_w), round(win_h))
+            valid_c_start = max(0, c_start)
+            valid_r_start = max(0, r_start)
+            valid_c_end = min(c_start + W_chunk, target_img_w)
+            valid_r_end = min(r_start + H_chunk, target_img_h)
 
-                # Read the data from the calculated window and resample to the target shape.
-                band_data = src.read(
+            valid_w = valid_c_end - valid_c_start
+            valid_h = valid_r_end - valid_r_start
+
+            band_data = np.zeros((H_chunk, W_chunk), dtype=np.float32)
+
+            if valid_w > 0 and valid_h > 0:
+                src_win_c = valid_c_start / scale_x
+                src_win_r = valid_r_start / scale_y
+                src_win_w = valid_w / scale_x
+                src_win_h = valid_h / scale_y
+                
+                window = Window(src_win_c, src_win_r, src_win_w, src_win_h)
+
+                valid_data = src.read(
                     1,
                     window=window,
-                    out_shape=target_shape,
-                    resampling=Resampling.nearest,
-                    boundless=True # Use boundless to avoid edge errors with calculated windows
+                    out_shape=(valid_h, valid_w),
+                    resampling=Resampling.nearest
                 )
+                
+                if offset != 0.0:
+                    valid_data = valid_data.astype(np.float32)
+                    valid_data = np.maximum(valid_data + offset, 0)
+
+                # Convert to 0-1 Reflectance and ensure float32
+                valid_data = valid_data.astype(np.float32) / 10000.0
+
+                dest_r = valid_r_start - r_start
+                dest_c = valid_c_start - c_start
+                band_data[dest_r:dest_r+valid_h, dest_c:dest_c+valid_w] = valid_data
+
+                if pad_if_needed:
+                    pad_top = dest_r
+                    pad_left = dest_c
+                    pad_bottom = H_chunk - (dest_r + valid_h)
+                    pad_right = W_chunk - (dest_c + valid_w)
+
+                    if pad_top > 0 or pad_left > 0 or pad_bottom > 0 or pad_right > 0:
+                        roi = band_data[dest_r:dest_r+valid_h, dest_c:dest_c+valid_w]
+                        padded_roi = np.pad(roi, ((pad_top, pad_bottom), (pad_left, pad_right)), mode='reflect')
+                        band_data = padded_roi
+            
             band_data_list.append(band_data.astype(np.float32))
 
-    return np.stack(band_data_list, axis=0), ref_crs, ref_transform
+    return np.stack(band_data_list, axis=0), ref_crs, ref_transform, ref_size
 
-# --- Main Public Functions ---
-
-def read_chunk_data(tile_folder: Path, BANDS: List[str], r_start: int, c_start: int, W_chunk: int, H_chunk: int) -> np.ndarray:
+def read_chunk_data(tile_folder: Path, bands_list: List[str], r_start: int, c_start: int, W_chunk: int, H_chunk: int, use_sentinel_1: bool = False) -> np.ndarray:
     """
     Public wrapper to read a single chunk of Sentinel-2 data.
     """
-    s2_data, s2_crs, s2_transform = _read_s2_bands_for_chunk(tile_folder, r_start, c_start, W_chunk, H_chunk)
+    s2_data, s2_crs, s2_transform, s2_size = _read_s2_bands_for_chunk(tile_folder, r_start, c_start, W_chunk, H_chunk, bands_list=bands_list)
     
-    if USE_SENTINEL_1:
-        s1_data, s1_crs, s1_transform = _read_s1_bands_for_chunk(tile_folder, r_start, c_start, W_chunk, H_chunk)
-        
-        if s1_data.size == 0:
-            return s2_data
-
-        if s1_crs is None:
-            raise ValueError("Sentinel-1 data is missing CRS information and cannot be reprojected.")
-
-        # If CRS or transform do not match, reproject S1 data to S2's grid.
-        if s1_crs != s2_crs or not rasterio.transform.almost_equals(s1_transform, s2_transform):
-            print(f"⚠️ CRS or transform mismatch. Reprojecting S1 data to match S2.")
-            
-            # Create an empty array for the reprojected data
-            reprojected_s1_data = np.empty((s1_data.shape[0], s2_data.shape[1], s2_data.shape[2]), dtype=np.float32)
-            
-            rasterio.warp.reproject(
-                source=s1_data,
-                destination=reprojected_s1_data,
-                src_transform=s1_transform,
-                src_crs=s1_crs,
-                dst_transform=s2_transform,
-                dst_crs=s2_crs,
-                resampling=Resampling.nearest
-            )
-            s1_data = reprojected_s1_data
-
+    if use_sentinel_1:
+        # Pass S2 reference to S1 reader for auto-alignment
+        s1_data, _, _ = _read_s1_bands_for_chunk(
+            tile_folder, r_start, c_start, W_chunk, H_chunk, 
+            bands_list=bands_list,
+            ref_crs=s2_crs,
+            ref_transform=s2_transform,
+            ref_size=s2_size
+        )
         return np.concatenate([s2_data, s1_data], axis=0)
     else:
         return s2_data
 
-
-def cut_into_patches(img_chunk: np.ndarray, PATCH_SIZE: int, stride: int = PATCH_STRIDE) -> Tuple[np.ndarray, List[Tuple[int, int]], int, int, int]:
+def cut_into_patches(img_chunk: np.ndarray, patch_size: int, stride: int = None) -> Tuple[np.ndarray, List[Tuple[int, int]], int, int, int]:
     """
     Cuts the larger image chunk into smaller, overlapping patches for inference.
-    
-    Args:
-        img_chunk (np.ndarray): The input chunk data (C, H, W).
-        PATCH_SIZE (int): The side length of the square patch (e.g., 120).
-        stride (int, optional): The step size for creating patches. Defaults to PATCH_SIZE // 2.
-        
-    Returns:
-        Tuple[np.ndarray, List[Tuple[int, int]], int, int, int]:
-            - np.ndarray: Patches array (N, C, H_p, W_p).
-            - List[Tuple[int, int]]: (r_start, c_start) coordinates of each patch within the chunk.
-            - int: Cropped height.
-            - int: Cropped width.
-            - int: Patch size.
     """
     if stride is None:
-        stride = PATCH_SIZE // 2
+        stride = patch_size // 2
 
     C, H, W = img_chunk.shape
-    
     patches = []
-    coords = [] # (r_start_within_chunk, c_start_within_chunk)
+    coords = [] 
     
-    for r_start in range(0, H - PATCH_SIZE + 1, stride):
-        for c_start in range(0, W - PATCH_SIZE + 1, stride):
-            patch = img_chunk[:, r_start:r_start + PATCH_SIZE, c_start:c_start + PATCH_SIZE]
+    for r_start in range(0, H - patch_size + 1, stride):
+        for c_start in range(0, W - patch_size + 1, stride):
+            patch = img_chunk[:, r_start:r_start + patch_size, c_start:c_start + patch_size]
             patches.append(patch)
             coords.append((r_start, c_start))
 
-    # Handle the right and bottom edges
-    if (H - PATCH_SIZE) % stride != 0:
-        r_start = H - PATCH_SIZE
-        for c_start in range(0, W - PATCH_SIZE + 1, stride):
-            patch = img_chunk[:, r_start:r_start + PATCH_SIZE, c_start:c_start + PATCH_SIZE]
+    if (H - patch_size) % stride != 0:
+        r_start = H - patch_size
+        for c_start in range(0, W - patch_size + 1, stride):
+            patch = img_chunk[:, r_start:r_start + patch_size, c_start:c_start + patch_size]
             patches.append(patch)
             coords.append((r_start, c_start))
 
-    if (W - PATCH_SIZE) % stride != 0:
-        c_start = W - PATCH_SIZE
-        for r_start in range(0, H - PATCH_SIZE + 1, stride):
-            patch = img_chunk[:, r_start:r_start + PATCH_SIZE, c_start:c_start + PATCH_SIZE]
+    if (W - patch_size) % stride != 0:
+        c_start = W - patch_size
+        for r_start in range(0, H - patch_size + 1, stride):
+            patch = img_chunk[:, r_start:r_start + patch_size, c_start:c_start + patch_size]
             patches.append(patch)
             coords.append((r_start, c_start))
 
-    # Handle the bottom-right corner
-    if (H - PATCH_SIZE) % stride != 0 and (W - PATCH_SIZE) % stride != 0:
-        r_start = H - PATCH_SIZE
-        c_start = W - PATCH_SIZE
-        patch = img_chunk[:, r_start:r_start + PATCH_SIZE, c_start:c_start + PATCH_SIZE]
+    if (H - patch_size) % stride != 0 and (W - patch_size) % stride != 0:
+        r_start = H - patch_size
+        c_start = W - patch_size
+        patch = img_chunk[:, r_start:r_start + patch_size, c_start:c_start + patch_size]
         patches.append(patch)
         coords.append((r_start, c_start))
 
     if not patches:
-        # This can happen if the chunk is smaller than the patch size
-        # Fallback to a single patch from the top-left corner
-        if H >= PATCH_SIZE and W >= PATCH_SIZE:
-            patch = img_chunk[:, 0:PATCH_SIZE, 0:PATCH_SIZE]
+        if H >= patch_size and W >= patch_size:
+            patch = img_chunk[:, 0:patch_size, 0:patch_size]
             patches.append(patch)
             coords.append((0,0))
         else:
-            raise ValueError("Chunk size is smaller than patch size, cannot create any patches.")
+            raise ValueError(f"Chunk size ({H}x{W}) is smaller than patch size ({patch_size}).")
         
     patches_array = np.stack(patches, axis=0)
-    
-    return patches_array, coords, H, W, PATCH_SIZE
-    
-
-# --- PyTorch Dataset Classes (Not currently used in the main pipeline but kept for context) ---
-
-class OnDiskPatchDataset(Dataset):
-    """
-    A PyTorch Dataset that reads the full 12-band patch on-demand from disk.
-    This is very slow for large-scale chunk processing but useful for DataLoader examples.
-    """
-    # NOTE: This class definition relies on _find_band_path and _read_all_bands_for_patch
-    # which are now defined above.
-    pass # Placeholder for full class definition
+    return patches_array, coords, H, W, patch_size

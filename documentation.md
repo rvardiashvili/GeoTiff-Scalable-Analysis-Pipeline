@@ -205,25 +205,19 @@ The pipeline includes a benchmark mode to facilitate performance testing and ana
 
 ### 3.3. Configuration
 
+The pipeline is highly configurable via [Hydra](https://hydra.cc/), using structured YAML files located in the `configs/` directory.
 
+Key parameters in `configs/pipeline/inference_params.yaml` include:
 
-The pipeline is highly configurable via the `src/ben_v2/config.py` file. Key parameters include:
+-   `tiling.zone_of_responsibility_size`: The side dimension of the valid output area for each chunk (processing unit).
+-   `tiling.halo_size_pixels`: The margin added to each chunk to mitigate edge effects.
+-   `tiling.patch_size`: The side dimension of the model input patch (e.g., 120).
+-   `distributed.gpu_batch_size`: The number of patches in a batch for GPU inference.
 
+Model parameters (bands, normalization statistics) are defined in `configs/model/`.
 
-
--   `REPO_ID`: The Hugging Face Hub repository ID for the pre-trained model.
-
--   `CHUNK_SIZE`: The side dimension of a processing chunk.
-
--   `PATCH_SIZE`: The side dimension of a model input patch.
-
--   `GPU_BATCH_SIZE`: The number of patches in a batch for GPU inference.
-
--   `MODEL_NAME`: The name of the pre-trained model, used to dynamically load model-specific configurations (bands, means, stds).
-
--   `DEVICE`: The target device for computation (`"cuda"` or `"cpu"`).
-
--   `BANDS`: The list of Sentinel-2 bands to be used, dynamically determined by `MODEL_NAME`.
+Parameters can be overridden at runtime via the command line:
+`python src/main.py pipeline.distributed.gpu_batch_size=64`
 
 
 

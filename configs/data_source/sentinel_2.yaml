@@ -1,0 +1,16 @@
+# @package _global_
+data_source:
+  bands: 
+    - 'B02'
+    - 'B03'
+    - 'B04'
+    - 'B05'
+    - 'B06'
+    - 'B07'
+    - 'B08'
+    - 'B8A'
+    - 'B11'
+    - 'B12'
+  
+  use_sentinel_1: false
+  s1_bands: ['VV', 'VH']

@@ -8,3 +8,6 @@ matplotlib
 Pillow
 scipy
 configilm
+hydra-core
+ray
+omegaconf

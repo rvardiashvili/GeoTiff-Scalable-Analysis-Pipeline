@@ -1,296 +1,363 @@
-import numpy as np, torch, rasterio, time, gc, json, threading, queue, sys
-from rasterio.enums import Resampling
-from rasterio.windows import Window
+import numpy as np
+import torch
+import torch.multiprocessing as mp
+import rasterio
+import time
+import gc
+import json
+import sys
+import logging
+import queue
 from pathlib import Path
+from rasterio.windows import Window
+from rasterio.enums import Resampling
+from typing import Tuple, List, Optional, Dict, Any
+from omegaconf import DictConfig, OmegaConf
+import hydra
 from tqdm import tqdm
-from torch.utils.data import DataLoader
-from typing import Tuple, List
-from collections.abc import Callable
-from .config import (
-    PATCH_SIZE, REPO_ID, DEVICE, GPU_BATCH_SIZE, USE_AMP, autocast, 
-    CONFIDENCE_THRESHOLD, CHUNK_SIZE, BANDS, SAVE_FULL_PROBS, SAVE_PREVIEW_IMAGE, PREVIEW_DOWNSCALE_FACTOR
-)
+
+# Import new fusion module
+from .fusion import MultiModalInput, DeepLearningRegistrationPipeline
+# Reuse existing utilities where possible
 from .utils import (
-    NEW_LABELS, LABEL_COLOR_MAP, BigEarthNetv2_0_ImageClassifier,
-    NORM_M, NORM_S, STANDARD_BANDS, save_color_mask_preview, run_gpu_inference
+    NEW_LABELS, LABEL_COLOR_MAP, save_color_mask_preview, run_gpu_inference, get_device
 )
-from .data import read_chunk_data, cut_into_patches
+from .data import _read_s2_bands_for_chunk, _read_s1_bands_for_chunk, _find_band_path
+from .generate_viewer import generate_single_node_viewer
+from .memory_utils import resolve_zor
 
-# ------------------------------------------------------------
-# Setup
-# ------------------------------------------------------------
-FALLBACK_LABEL = "No_Dominant_Class"
-LABEL_COLOR_MAP[FALLBACK_LABEL] = np.array([128,128,128],dtype=np.uint8)
+log = logging.getLogger(__name__)
 
-SAVE_CONFIDENCE = True
-SAVE_ENTROPY = True
-SAVE_GAP = True # Assuming this was intended to be defined here
-PROB_DTYPE = np.float32
-PROB_COMPRESS = "lzw"
 
-# ------------------------------------------------------------
-def _find_band_path(tile_folder: Path, band_name: str) -> Path | None:
-    for ext in ['.jp2','.tif']:
-        candidate = next(tile_folder.rglob(f"*{band_name}*{ext}"), None)
-        if candidate:
-            return candidate
-    return None
+class ERFAwareInference:
+    """
+    Handles the Tiling-Error-Free inference using the Overlap-Tile strategy.
+    """
+    def __init__(self, model, zor_size: int, halo_size: int, norm_m: torch.Tensor, norm_s: torch.Tensor, device=None):
+        self.model = model
+        self.zor = zor_size
+        self.halo = halo_size
+        self.input_size = self.zor + (2 * self.halo)
+        self.device = device or get_device()
+        self.fusion_pipeline = DeepLearningRegistrationPipeline() # Placeholder
+        
+        # Ensure norms are on the correct device
+        self.norm_m = norm_m.to(self.device)
+        self.norm_s = norm_s.to(self.device)
 
-# ------------------------------------------------------------
-def accumulate_probs(results: np.ndarray, coords: List[Tuple[int, int]], H: int, W: int, patch_size: int, n_classes: int, weight_mask: np.ndarray, weight_mask_count: np.ndarray) -> np.ndarray:
-    avg = np.zeros((H, W, n_classes), dtype=np.float32)
-    count = np.zeros((H, W, 1), dtype=np.float32)
-    for i, (r0, c0) in enumerate(coords):
-        prob = results[i]
-        weighted_prob = prob[np.newaxis, np.newaxis, :] * weight_mask
-        avg[r0:r0+patch_size, c0:c0+patch_size, :] += weighted_prob
-        count[r0:r0+patch_size, c0:c0+patch_size, :] += weight_mask_count
-    count[count == 0] = 1.0
-    avg /= count
-    return avg
+    def infer_tile_region(self, tile_folder: Path, r_start: int, c_start: int, cfg: DictConfig) -> Tuple[np.ndarray, List[Tuple[int,int]], int, int]:
+        """
+        Reads padded region, runs inference on patches.
+        Returns:
+            results: (N_patches, N_classes) - raw probabilities from model
+            coords: List of (r, c) patch offsets
+            H_crop: Height of the chunk to be reconstructed
+            W_crop: Width of the chunk to be reconstructed
+        """
+        from .data import cut_into_patches
+        
+        # 1. Define Read Window (ZoR + Halo)
+        r_read = r_start - self.halo
+        c_read = c_start - self.halo
+        w_read = self.input_size
+        h_read = self.input_size
+        
+        # Determine bands to read
+        if 'bands' in cfg.model:
+             bands = list(cfg.model.bands)
+        else:
+             bands = list(cfg.data_source.bands)
 
-# ------------------------------------------------------------
-def main(tile_folder: str, crop_limit=None, output_directory: str | None = None, extra_data_generators: List[Callable] | None = None, model=None):
+        use_s1 = any(b in ['VV', 'VH'] for b in bands)
+
+        # S2 Data
+        s2_bands = [b for b in bands if 'B' in b]
+        s2_data, s2_crs, s2_transform, s2_size = _read_s2_bands_for_chunk(tile_folder, r_read, c_read, w_read, h_read, pad_if_needed=True, bands_list=s2_bands)
+        
+        log.info(f"DEBUG: S2 Data Stats - Shape: {s2_data.shape}, Min: {s2_data.min():.4f}, Max: {s2_data.max():.4f}, Mean: {s2_data.mean():.4f}")
+
+        # S1 Data
+        if use_s1:
+            s1_bands = [b for b in bands if b in ['VV', 'VH']]
+            s1_data, _, _ = _read_s1_bands_for_chunk(
+                tile_folder, r_read, c_read, w_read, h_read, 
+                pad_if_needed=True, 
+                bands_list=s1_bands,
+                ref_crs=s2_crs,
+                ref_transform=s2_transform,
+                ref_size=s2_size
+            )
+            
+            if s1_data.size > 0:
+                log.info(f"DEBUG: S1 Data Stats - Shape: {s1_data.shape}, Min: {s1_data.min():.4f}, Max: {s1_data.max():.4f}, Mean: {s1_data.mean():.4f}")
+                
+                # --- CLIP UPDATE ---
+                # Allow values up to 30.0 dB to capture double-bounce (Urban)
+                s1_data = np.clip(s1_data, -50.0, 30.0) 
+            
+            # CRITICAL FIX: Concatenate S1 FIRST, then S2.
+            # Matches config: ["VV", "VH", "B02", ...]
+            input_data = np.concatenate([s1_data, s2_data], axis=0)
+        else:
+            input_data = s2_data
+
+        # 2. Cut into patches
+        patch_size = cfg.pipeline.tiling.get('patch_size', 120)
+        stride = cfg.pipeline.tiling.get('patch_stride', patch_size // 2)
+        
+        patches, coords, H_crop, W_crop, _ = cut_into_patches(input_data, patch_size, stride=stride)
+        
+        # 3. Run batch inference (on GPU)
+        batch_size = cfg.pipeline.distributed.get('gpu_batch_size', 32)
+        use_amp = True # Default to True if possible
+        
+        results = run_gpu_inference(
+            patches, 
+            self.model, 
+            norm_m=self.norm_m, 
+            norm_s=self.norm_s,
+            device=self.device,
+            batch_size=batch_size,
+            use_amp=use_amp
+        )
+        
+        return results, coords, H_crop, W_crop
+
+
+def writer_process(q: mp.Queue, out_paths: Dict[str, Path], profile_dict: Dict[str, Any], zor: int, halo: int, W_full: int, H_full: int, total_chunks: int, patch_size: int):
+    """
+    Independent process to reconstruct map, calculate metrics, and write results.
+    Receives raw patch probabilities.
+    """
+    # Pre-calculate sinusoidal window for reconstruction
+    window_1d = np.sin(np.linspace(0, np.pi, patch_size))**2
+    patch_weight = np.outer(window_1d, window_1d).astype(np.float32)
+    patch_weight = patch_weight[np.newaxis, :, :] # (1, P, P)
+    
+    # Open files
+    dsts = {}
+    pbar = tqdm(total=total_chunks, desc="Writing  ", position=1, leave=True)
+    
+    try:
+        for key, path in out_paths.items():
+            if path:
+                p = profile_dict.copy()
+                if key == 'class':
+                    p.update(dtype='uint8', nodata=255)
+                else:
+                    p.update(dtype='float32', nodata=None)
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                dsts[key] = rasterio.open(path, 'w', **p)
+
+        while True:
+            item = q.get()
+            if item is None:
+                break
+            
+            r_chunk_start, c_chunk_start, results_t, coords_t, H_crop, W_crop = item
+            
+            results = results_t.numpy()
+            coords = coords_t 
+            
+            # --- Reconstruction (CPU Heavy) ---
+            n_classes = results.shape[1]
+            avg_probs = np.zeros((n_classes, H_crop, W_crop), dtype=np.float32)
+            weight_sum = np.zeros((1, H_crop, W_crop), dtype=np.float32)
+            
+            idx = 0
+            for r_p, c_p in coords:
+                patch_prob = results[idx][:, np.newaxis, np.newaxis] * patch_weight
+                avg_probs[:, r_p:r_p+patch_size, c_p:c_p+patch_size] += patch_prob
+                weight_sum[:, r_p:r_p+patch_size, c_p:c_p+patch_size] += patch_weight
+                idx += 1
+                
+            weight_sum[weight_sum == 0] = 1.0
+            probs_map = avg_probs / weight_sum
+
+            # --- Crop Center (ZoR) ---
+            if probs_map.ndim == 3:
+                h, w = probs_map.shape[1], probs_map.shape[2]
+                start_y, start_x = halo, halo
+                end_y, end_x = h - halo, w - halo
+                valid_probs = probs_map[:, start_y:end_y, start_x:end_x]
+            else:
+                 pass
+
+            # --- Metrics Calculation (CPU Heavy) ---
+            dom = np.argmax(valid_probs, axis=0).astype(np.uint8)
+            
+            if 'conf' in dsts:
+                conf = np.max(valid_probs, axis=0).astype(np.float32)
+            else:
+                conf = None
+                
+            if 'entr' in dsts:
+                entr = -np.sum(valid_probs * np.log(np.clip(valid_probs, 1e-6, 1.0)), axis=0).astype(np.float32)
+            else:
+                entr = None
+                
+            if 'gap' in dsts:
+                top2 = np.partition(valid_probs, -2, axis=0)[-2:]
+                gap = (top2[1] - top2[0]).astype(np.float32)
+            else:
+                gap = None
+            
+            # --- Write to Disk ---
+            w_width = min(zor, W_full - c_chunk_start)
+            w_height = min(zor, H_full - r_chunk_start)
+            window = Window(c_chunk_start, r_chunk_start, w_width, w_height)
+            
+            if 'class' in dsts: dsts['class'].write(dom[:w_height, :w_width], window=window, indexes=1)
+            if 'conf' in dsts: dsts['conf'].write(conf[:w_height, :w_width], window=window, indexes=1)
+            if 'entr' in dsts and entr is not None: dsts['entr'].write(entr[:w_height, :w_width], window=window, indexes=1)
+            if 'gap' in dsts and gap is not None: dsts['gap'].write(gap[:w_height, :w_width], window=window, indexes=1)
+            
+            pbar.update(1)
+
+    except Exception as e:
+        print(f"CRITICAL ERROR IN WRITER PROCESS: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+    finally:
+        pbar.close()
+        for dst in dsts.values():
+            dst.close()
+
+
+def main_hydra(cfg: DictConfig, model=None):
+    try:
+        ctx = mp.get_context('spawn')
+    except ValueError:
+        ctx = mp.get_context('fork')
+
     t0 = time.time()
-    tile = Path(tile_folder)
-    # Ensure output_directory is used correctly
-    out_base = Path(output_directory or tile.parent)
-    out_path = out_base / tile.name
-    out_path.mkdir(parents=True, exist_ok=True)
-
-    target_band_path = _find_band_path(tile, 'B02')
-    if not target_band_path:
-        print("❌ Error: Reference band B02 not found.")
-        return
-
-    with rasterio.open(target_band_path) as src:
-        H_full_original, W_full_original = src.height, src.width
-        # 1. Get the base profile, including geospatial info
-        base_profile = src.profile
-        full_tile_shape = (H_full_original, W_full_original)
-
-    if crop_limit:
-        H_full = min(H_full_original, crop_limit[0])
-        W_full = min(W_full_original, crop_limit[1])
+    tile_path = Path(cfg.input_path)
+    output_path = Path(cfg.output_path) / tile_path.name
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    log.info(f"Processing tile: {tile_path}")
+    log.info(f"Output directory: {output_path}")
+    
+    # Setup Model
+    if model is None:
+        model_path_parts = cfg.model.pretrained_model_name_or_path.split('/')
+        model_display_name = model_path_parts[-1] if len(model_path_parts) > 1 else cfg.model.pretrained_model_name_or_path
+        log.info(f"Initializing model: {model_display_name}")
+        model = hydra.utils.instantiate(cfg.model)
+        device = get_device()
+        model.to(device).eval()
     else:
-        H_full, W_full = H_full_original, W_full_original
+        log.info("Using pre-loaded model.")
+        device = get_device() # Ensure device is set correctly even if model pre-loaded (model.device not reliable if on cpu)
+        # Ideally check model.device, but get_device() is safe for new tensors.
     
-    # --- Profile Generation (Fixes RasterBlockError and StripOffsets Error) ---
+    # Get Tile Dimensions
+    ref_path = _find_band_path(tile_path, 'B02')
+    with rasterio.open(ref_path) as src:
+        H_full, W_full = src.shape
+        profile = src.profile.copy()
+
+    # Determine Means and Stds for Normalization from the config file
+    if 'means' in cfg.model and 'stds' in cfg.model:
+        means = cfg.model.means
+        stds = cfg.model.stds
+    else:
+        raise ValueError("Model config must contain 'means' and 'stds' for normalization.")
+        
+    log.info(f"Using fixed normalization MEANS: {means}")
+    log.info(f"Using fixed normalization STDS: {stds}")
+
+    norm_m = torch.tensor(means, dtype=torch.float32).view(1, len(means), 1, 1)
+    norm_s = torch.tensor(stds, dtype=torch.float32).view(1, len(stds), 1, 1)
     
-    # Keys that often cause conflict when changing from stripped/tiled or changing driver
-    # We remove parameters that define the internal TIFF structure which we are redefining below.
-    keys_to_remove = ['tiled', 'blockxsize', 'blockysize', 'interleave', 'compress', 'count', 'dtype', 'nodata', 'driver']
+    # Setup Inference Engine
+    zor_config = cfg.pipeline.tiling.zone_of_responsibility_size
+    halo = cfg.pipeline.tiling.halo_size_pixels
+    patch_size = cfg.pipeline.tiling.get('patch_size', 120)
     
-    # Start with a clean profile derived from the source
-    profile_base = base_profile.copy()
-    for key in keys_to_remove:
-        profile_base.pop(key, None)
+    zor = resolve_zor(zor_config, halo, patch_size=patch_size)
+    log.info(f"Inference Configuration: ZoR={zor}, Halo={halo}, ChunkSize={zor + 2*halo}")
     
-    # 2. Define the Tiled GeoTIFF profile for uint8 class masks
-    profile_mask = profile_base.copy()
-    profile_mask.update(
-        driver="GTiff",
-        height=H_full,  # Ensure final height is set
-        width=W_full,   # Ensure final width is set
-        dtype=rasterio.uint8,
+    erf_engine = ERFAwareInference(model, zor, halo, norm_m, norm_s, device)
+
+    # Prepare Output Profiles
+    profile.update(
+        driver='GTiff',
         count=1,
-        nodata=255, 
-        compress='lzw',
-        tiled=True, 
-        blockxsize=CHUNK_SIZE, # CHUNK_SIZE must be a multiple of 16!
-        blockysize=CHUNK_SIZE
-    )
-    
-    # 3. Define the Tiled GeoTIFF profile for float (max_prob, entropy, gap)
-    profile_float = profile_base.copy()
-    profile_float.update(
-        driver="GTiff",
-        height=H_full,  # Ensure final height is set
-        width=W_full,   # Ensure final width is set
-        dtype=rasterio.float32,
-        count=1, # For single-band outputs
         compress='lzw',
         tiled=True,
-        blockxsize=CHUNK_SIZE,
-        blockysize=CHUNK_SIZE
+        blockxsize=256, 
+        blockysize=256
     )
-
-    out_class_path = out_path / f"{tile.name}_class.tif"
-    out_conf_path  = out_path / f"{tile.name}_maxprob.tif"
-    out_prob_path  = out_path / f"{tile.name}_probs.tif"
-    out_entropy_path = out_path / f"{tile.name}_entropy.tif"
-    out_gap_path = out_path / f"{tile.name}_gap.tif"
-
-    # Create a detailed class map with labels, indices, and colors
-    class_map_data = {
-        label: {
-            "index": i,
-            "color_rgb": LABEL_COLOR_MAP[label].tolist()
-        }
-        for i, label in enumerate(NEW_LABELS)
+    
+    # Prepare Paths for Writer
+    out_paths = {
+        'class': output_path / f"{tile_path.name}_class.tif",
+        'conf': output_path / f"{tile_path.name}_maxprob.tif",
     }
-    # Also add the fallback label for completeness
-    class_map_data[FALLBACK_LABEL] = {
-        "index": 255, # Using 255 as it's the nodata value for the mask
-        "color_rgb": LABEL_COLOR_MAP[FALLBACK_LABEL].tolist()
-    }
+    if cfg.pipeline.output.save_entropy:
+        out_paths['entr'] = output_path / f"{tile_path.name}_entropy.tif"
+    if cfg.pipeline.output.save_gap:
+        out_paths['gap'] = output_path / f"{tile_path.name}_gap.tif"
 
-    with open(out_path / f"{tile.name}_classmap.json", "w") as f:
-        json.dump(class_map_data, f, indent=2)
+    # Calculate Total Chunks
+    coords_list = []
+    for r in range(0, H_full, zor):
+        for c in range(0, W_full, zor):
+            coords_list.append((r,c))
+    total_chunks = len(coords_list)
 
-    if model is None:
-        model = BigEarthNetv2_0_ImageClassifier.from_pretrained(REPO_ID).to(DEVICE).eval()
+    # --- Initialize Writer Process ---
+    write_queue = ctx.Queue(maxsize=4) 
+    
+    writer_p = ctx.Process(
+        target=writer_process,
+        args=(write_queue, out_paths, profile, zor, halo, W_full, H_full, total_chunks, patch_size),
+        daemon=True
+    )
+    writer_p.start()
 
-    # --- Pre-calculate weighting masks ---
-    n_classes = len(NEW_LABELS)
-    window_2d = np.outer(np.sin(np.linspace(0, np.pi, PATCH_SIZE))**2,
-                         np.sin(np.linspace(0, np.pi, PATCH_SIZE))**2).astype(np.float32)
-    weight_mask = np.tile(window_2d[:,:,np.newaxis], (1, 1, n_classes))
-    weight_mask_count = np.tile(window_2d[:,:,np.newaxis], (1, 1, 1))
+    # Distributed Execution Branch
+    if cfg.pipeline.distributed.engine == 'ray':
+        log.error("Ray distributed mode not yet updated for decoupled writer.")
+        pass
+    
+    log.info("Starting Inference Loop (ERF-Aware)")
+    
+    inference_pbar = tqdm(total=total_chunks, desc="Inference", position=0, leave=True)
+    
+    try:
+        for r, c in coords_list:
+            # 1. Read -> Cut -> Infer (GPU)
+            results, coords, H_crop, W_crop = erf_engine.infer_tile_region(tile_path, r, c, cfg)
+            
+            # 2. Pass to Writer (CPU)
+            results_t = torch.from_numpy(results).share_memory_()
+            
+            write_queue.put((r, c, results_t, coords, H_crop, W_crop))
+            
+            inference_pbar.update(1)
 
-    result_queue = queue.Queue(maxsize=2)
-    stop_signal = object()
-    total_chunks = ((H_full + CHUNK_SIZE - 1) // CHUNK_SIZE) * ((W_full + CHUNK_SIZE - 1) // CHUNK_SIZE)
-    mosaic_pbar = tqdm(total=total_chunks, desc="Writing", position=1)
-    fetch_pbar  = tqdm(total=total_chunks, desc="Inference", position=0)
+    finally:
+        inference_pbar.close()
+        write_queue.put(None)
+        writer_p.join()
 
-    def mosaicking_worker(dst_class, dst_conf=None, dst_probs=None, dst_entropy=None, dst_gap=None, extra_data_generators=None, weight_mask=None, weight_mask_count=None):
-        try:
-            while True:
-                item = result_queue.get()
-                if item is stop_signal:
-                    result_queue.task_done()
-                    break
-                (results, coords, H_crop, W_crop, patch_size, n_classes_runtime,
-                 c_start, r_start, W_chunk, H_chunk) = item
-                try:
-                    # Accumulate probabilities
-                    avg = accumulate_probs(results, coords, H_crop, W_crop, patch_size, n_classes_runtime, weight_mask, weight_mask_count)
-                    
-                    # Calculate outputs
-                    dominant_idx = np.argmax(avg, axis=2).astype(np.uint8)
-                    max_prob = np.max(avg, axis=2).astype(np.float32)
-                    entropy = -np.sum(avg * np.log(np.clip(avg, 1e-6, 1.0)), axis=2).astype(np.float32)
-                    
-                    # Calculate Gap (Difference between max and second-max prob)
-                    top2 = np.partition(avg, -2, axis=2)[:, :, -2:]
-                    gap = (top2[:, :, 1] - top2[:, :, 0]).astype(np.float32)
+    # Metadata
+    class_map = {label: {"index": i, "color": c.tolist()} for i, (label, c) in enumerate(zip(NEW_LABELS, LABEL_COLOR_MAP.values()))}
+    with open(output_path / f"{tile_path.name}_classmap.json", "w") as f:
+        json.dump(class_map, f)
 
-                    # Write to GeoTIFFs
-                    window_cropped = Window(col_off=c_start, row_off=r_start, width=W_chunk, height=H_chunk)
-                    
-                    dst_class.write(dominant_idx[np.newaxis,:,:], window=window_cropped)
-                    if dst_conf is not None:
-                        dst_conf.write(max_prob[np.newaxis,:,:], window=window_cropped)
-                    if dst_entropy is not None:
-                        dst_entropy.write(entropy[np.newaxis,:,:], window=window_cropped)
-                    if dst_gap is not None:
-                        dst_gap.write(gap[np.newaxis,:,:], window=window_cropped)
-                    if dst_probs is not None:
-                        # Write all probability bands (n_classes bands)
-                        dst_probs.write(avg.transpose(2,0,1), window=window_cropped)
+    save_preview = cfg.pipeline.output.get('save_preview', True)
+    if save_preview:
+        downscale = cfg.pipeline.output.get("preview_downscale_factor", 10)
+        class_path = out_paths['class']
+        with rasterio.open(class_path) as src:
+            save_color_mask_preview(src.read(1), output_path / "preview.png", save_preview=save_preview, downscale_factor=downscale)
 
-                    if extra_data_generators:
-                        for generator_func in extra_data_generators:
-                            extra_data = generator_func(probabilities=avg, NEW_LABELS=NEW_LABELS)
-                            out_extra_path = out_path / f"{tile.name}_{generator_func.__name__}.tif"
-                            with rasterio.open(out_extra_path, "w", **profile_float) as dst_extra:
-                                dst_extra.write(extra_data[np.newaxis,:,:], window=window_cropped)
-                        
-                except Exception as e:
-                    print(f"Error in worker: {e}", file=sys.stderr)
-                finally:
-                    del results, avg
-                    gc.collect()
-                    mosaic_pbar.update(1)
-                    result_queue.task_done()
-        except Exception as e:
-            print(f"Fatal error in mosaicking_worker: {e}", file=sys.stderr)
+    try:
+        generate_single_node_viewer(tile_path.name, str(output_path.parent))
+    except Exception as e:
+        log.error(f"Failed to generate viewer: {e}")
 
-    # Open all destination files before starting the threads
-    with rasterio.open(out_class_path, "w", **profile_mask) as dst_class:
-        
-        # Open single-band float files
-        dst_conf = rasterio.open(out_conf_path, "w", **profile_float)
-        dst_entropy = rasterio.open(out_entropy_path, "w", **profile_float) if SAVE_ENTROPY else None
-        dst_gap = rasterio.open(out_gap_path, "w", **profile_float) if SAVE_GAP else None
-
-        # Open multi-band float file
-        if SAVE_FULL_PROBS:
-            profile_probs = profile_float.copy()
-            profile_probs.update(count=len(NEW_LABELS))
-            dst_probs = rasterio.open(out_prob_path, "w", **profile_probs)
-        else:
-            dst_probs = None
-
-        worker_thread = threading.Thread(
-            target=mosaicking_worker,
-            args=(dst_class, dst_conf, dst_probs, dst_entropy, dst_gap, extra_data_generators, weight_mask, weight_mask_count),
-            daemon=True
-        )
-        worker_thread.start()
-
-        for r_start in range(0, H_full, CHUNK_SIZE):
-            for c_start in range(0, W_full, CHUNK_SIZE):
-                r_end = min(r_start + CHUNK_SIZE, H_full)
-                c_end = min(c_start + CHUNK_SIZE, W_full)
-                H_chunk, W_chunk = r_end - r_start, c_end - c_start
-                
-                img_chunk = read_chunk_data(tile, BANDS, r_start, c_start, W_chunk, H_chunk)
-                
-                # Check for empty/nodata chunk
-                if img_chunk.size == 0 or np.mean(img_chunk < 1.0) > 0.99:
-                    dummy_idx = np.full((H_chunk, W_chunk), profile_mask.get('nodata', 255), dtype=np.uint8)
-                    dst_class.write(dummy_idx[np.newaxis,:,:], window=window)
-                    if dst_conf: dst_conf.write(np.full((H_chunk, W_chunk), 0.0, dtype=np.float32)[np.newaxis,:,:], window=window)
-                    if dst_entropy: dst_entropy.write(np.full((H_chunk, W_chunk), 0.0, dtype=np.float32)[np.newaxis,:,:], window=window)
-                    if dst_gap: dst_gap.write(np.full((H_chunk, W_chunk), 0.0, dtype=np.float32)[np.newaxis,:,:], window=window)
-                    if dst_probs: dst_probs.write(np.full((len(NEW_LABELS), H_chunk, W_chunk), 0.0, dtype=np.float32), window=window)
-                    fetch_pbar.update(1)
-                    mosaic_pbar.update(1) # Ensure we count this skipped chunk
-                    continue
-                
-                # Inference
-                patches, coords, H_crop, W_crop, _ = cut_into_patches(img_chunk, PATCH_SIZE)
-                del img_chunk; gc.collect()
-                results = run_gpu_inference(patches, model=model)
-                n_classes = results.shape[1] if results.ndim == 2 else len(NEW_LABELS)
-                del patches; gc.collect()
-                
-                # Push results to worker queue
-                result_queue.put((results, coords, H_crop, W_crop, PATCH_SIZE, n_classes,
-                                  c_start, r_start, W_chunk, H_chunk))
-                fetch_pbar.update(1)
-
-        result_queue.put(stop_signal)
-        result_queue.join()
-        worker_thread.join()
-
-        # Close all files
-        dst_conf.close()
-        if dst_entropy: dst_entropy.close()
-        if dst_gap: dst_gap.close()
-        if dst_probs: dst_probs.close()
-        fetch_pbar.close(); mosaic_pbar.close()
-
-    print(f"\n✅ Finished in {time.time()-t0:.2f}s")
-    print(f"Class map: {out_class_path}")
-    print(f"Max prob:  {out_conf_path}")
-    if SAVE_ENTROPY: print(f"Entropy:  {out_entropy_path}")
-    if SAVE_GAP: print(f"Gap:       {out_gap_path}")
-    if SAVE_FULL_PROBS: print(f"Full probs: {out_prob_path}")
-    if SAVE_PREVIEW_IMAGE:
-        # Need to re-open the file as it was closed in the worker thread
-        try:
-            with rasterio.open(out_class_path) as src:
-                class_mask = src.read(1)
-                # Calling the new, correctly imported function
-                save_color_mask_preview(
-                    class_mask, 
-                    out_path / "preview.png", 
-                    downscale_factor=PREVIEW_DOWNSCALE_FACTOR
-                )
-        except Exception as e:
-            print(f"❌ Error during final preview generation: {e}")
-
-    fetch_pbar.close(); mosaic_pbar.close()
+    log.info(f"Finished in {time.time() - t0:.2f}s")

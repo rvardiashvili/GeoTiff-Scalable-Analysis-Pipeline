@@ -148,25 +148,17 @@ python src/ben_v2/download_sentinel.py
 
 ### Configuration
 
+The pipeline's behavior is configured using [Hydra](https://hydra.cc/). The main configuration file is `configs/config.yaml`, which composes settings from:
 
+-   `configs/model/`: Model-specific settings (bands, normalization).
+-   `configs/pipeline/`: Inference parameters (tiling, batch size, output options).
+-   `configs/data_source/`: Data loading settings.
 
-The pipeline's behavior can be configured by modifying the `src/ben_v2/config.py` file. Key configuration options include:
+Key parameters can be overridden via the command line. For example:
 
-
-
--   `MODEL_NAME`: The name of the pre-trained model, used to dynamically load model-specific configurations (bands, means, stds).
-
--   `REPO_ID`: The Hugging Face Hub repository ID of the pre-trained model.
-
--   `CHUNK_SIZE`: The size of the chunks the input tile is divided into.
-
--   `PATCH_SIZE`: The size of the patches each chunk is divided into for model inference.
-
--   `GPU_BATCH_SIZE`: The batch size for GPU inference.
-
--   `DEVICE`: The device to use for inference (`"cuda"` or `"cpu"`).
-
-
+-   `pipeline.tiling.patch_size`: Size of inference patches.
+-   `pipeline.distributed.gpu_batch_size`: Batch size for GPU inference.
+-   `pipeline.output.save_preview`: Toggle preview image generation.
 
 ### Output Files
 

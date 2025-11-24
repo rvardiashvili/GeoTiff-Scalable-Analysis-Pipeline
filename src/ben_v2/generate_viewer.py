@@ -10,12 +10,13 @@ def generate_viewer(output_dir):
     
     # Find all subdirectories in the output directory that seem to be tile results
     tile_dirs = []
-    for d in os.listdir(output_dir):
-        path = os.path.join(output_dir, d)
-        if os.path.isdir(path):
-            # A simple check to see if it's a tile directory
-            if any(f.endswith('_classmap.json') for f in os.listdir(path)):
-                tile_dirs.append(d)
+    if os.path.exists(output_dir):
+        for d in os.listdir(output_dir):
+            path = os.path.join(output_dir, d)
+            if os.path.isdir(path):
+                # A simple check to see if it's a tile directory
+                if any(f.endswith('_classmap.json') for f in os.listdir(path)):
+                    tile_dirs.append(d)
 
     print(f"Found tile directories: {tile_dirs}")
 
@@ -62,7 +63,7 @@ def generate_viewer(output_dir):
                 return response.text();
             }})
             .then(data => {{
-                const rows = data.trim().split('\\n').map(row => row.split(','));
+                const rows = data.trim().split('\n').map(row => row.split(','));
                 if (rows.length < 1) return;
                 let table = '<table>';
                 table += '<thead><tr>' + rows[0].map(header => `<th>${{header}}</th>`).join('') + '</tr></thead>';
@@ -109,10 +110,10 @@ def generate_viewer(output_dir):
                         let legendHtml = '<h4>Legend</h4><div class="legend">';
                         for (const label in classmap) {{
                             if (label !== 'No_Dominant_Class') {{
-                                const color = classmap[label].color_rgb;
+                                const color = classmap[label].color_rgb || classmap[label].color;
                                 legendHtml += `
                                     <div class="legend-item">
-                                        <div class="legend-color" style="background-color: rgb(${{color[0]}}, ${{color[1]}}, ${{color[2]}})">.</div>
+                                        <div class="legend-color" style="background-color: rgb(${{color[0]}}, ${{color[1]}}, ${{color[2]}})"></div>
                                         <span>${{label.replace(/_/g, ' ')}}</span>
                                     </div>`;
                             }}
@@ -144,6 +145,9 @@ def generate_single_node_viewer(tile_name, output_dir):
     """
     print(f"Generating single node viewer for tile: {tile_name}")
 
+    # We use double braces {{ }} to output a single brace { } in f-strings for JS blocks
+    # For JS template literals that need ${var}, we must use ${{var}} in python f-string.
+    
     html_content = f"""
 <!DOCTYPE html>
 <html lang="en">
@@ -176,16 +180,18 @@ def generate_single_node_viewer(tile_name, output_dir):
         const previewImg = document.createElement('img');
         const previewPath = `preview.png`;
         previewImg.src = previewPath;
-        previewImg.alt = `Preview for {tile_name}`;
+        previewImg.alt = `Preview for ${{tileName}}`; 
         previewImg.onerror = () => {{ previewImg.alt = `Preview not found at ${{previewPath}}`; previewImg.style.display='none'; }};
         tileElement.appendChild(previewImg);
 
         const legendElement = document.createElement('div');
-        const classmapPath = `{tile_name}_classmap.json`;
+        // Corrected: Use ${{tileName}} to output ${{tileName}} in HTML, which JS interprets as template literal
+        const classmapPath = `${{tileName}}_classmap.json`;
+        
         fetch(classmapPath)
             .then(response => {{
                 if (!response.ok) {{
-                    throw new Error(`classmap.json not found for {tile_name}`);
+                    throw new Error(`classmap.json not found for ${{tileName}}`);
                 }}
                 return response.json();
             }})
@@ -193,7 +199,8 @@ def generate_single_node_viewer(tile_name, output_dir):
                 let legendHtml = '<h4>Legend</h4><div class="legend">';
                 for (const label in classmap) {{
                     if (label !== 'No_Dominant_Class') {{
-                        const color = classmap[label].color_rgb;
+                        // Handle both keys depending on how JSON was saved
+                        const color = classmap[label].color_rgb || classmap[label].color;
                         legendHtml += `
                             <div class="legend-item">
                                 <div class="legend-color" style="background-color: rgb(${{color[0]}}, ${{color[1]}}, ${{color[2]}})"></div>

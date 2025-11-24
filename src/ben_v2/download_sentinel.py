@@ -1,20 +1,23 @@
 import os
 import requests
-import pandas as pd
 import urllib.parse
 import zipfile
+import argparse
 from datetime import datetime, timedelta
 from tqdm import tqdm
 import time
 
-# --- Configuration ---
-USERNAME = "vardiashvilirati33@gmail.com"
-PASSWORD = "/C9&z2ha/e6VYnV"
-AOI_WKT = "POLYGON((8.715 53.11,8.91 53.11,8.91 53.01,8.715 53.01,8.715 53.11))"
-START_DATE = "2023-06-01T00:00:00.000Z"
-END_DATE = "2023-06-30T23:59:59.999Z"
-OUTPUT_DIR = "/home/rati/bsc_thesis/sentinel-2/"
-TIME_WINDOW_DAYS = 2  # Time window in days to search for matching images
+# --- Default Configuration (Can be overridden by CLI args) ---
+# Credentials should ideally be env vars, but keeping defaults for fallback
+DEFAULT_USERNAME = os.environ.get("CDSE_USERNAME", "vardiashvilirati33@gmail.com")
+DEFAULT_PASSWORD = os.environ.get("CDSE_PASSWORD", "/C9&z2ha/e6VYnV")
+# Venice, Italy (Approximate Bounding Box)
+# 12.20 45.30 to 12.50 45.60
+DEFAULT_AOI_WKT = "POLYGON((12.20 45.30, 12.50 45.30, 12.50 45.60, 12.20 45.60, 12.20 45.30))" 
+DEFAULT_START_DATE = "2023-06-01T00:00:00.000Z"
+DEFAULT_END_DATE = "2023-08-30T23:59:59.999Z"
+DEFAULT_OUTPUT_DIR = "/home/rati/bsc_thesis/sentinel-2/"
+DEFAULT_TIME_WINDOW_DAYS = 2
 MAX_RETRIES = 3
 
 def get_access_token(username, password):
@@ -54,7 +57,7 @@ def search_products(access_token, aoi_wkt, start_date, end_date, collection, ext
         filter_parts.append(extra_filters)
 
     filter_str = " and ".join(filter_parts)
-    encoded_filter = urllib.parse.quote(filter_str, safe="()'/,;= ")
+    encoded_filter = urllib.parse.quote(filter_str, safe="()'/;= ")
     
     paginated_url = f"{odata_url}&$filter={encoded_filter}&$top=1000"
 
@@ -120,59 +123,121 @@ def download_product(access_token, product_id, product_name, output_dir):
                 raise
 
 
+def download_specific_product(access_token, product_name, collection, output_dir):
+    """Downloads a specific product by its full name."""
+    print(f"\nSearching for specific product: {product_name} in {collection} collection...")
+    # Use very broad date range and AOI to ensure the product is found
+    # The actual date and AOI are implicitly part of the product name.
+    broad_aoi = "POLYGON((-180 -90, 180 -90, 180 90, -180 90, -180 -90))" # Global AOI
+    broad_start_date = "2010-01-01T00:00:00.000Z" # Start of Sentinel missions
+    broad_end_date = "2030-01-01T00:00:00.000Z" # Far in the future
+    
+    name_filter = f"Name eq '{product_name}'"
+    products = search_products(access_token, broad_aoi, broad_start_date, broad_end_date, collection, extra_filters=name_filter)
+    
+    if products:
+        product = products[0]
+        product_id = product['Id']
+        print(f"Found product ID for {product_name}: {product_id}")
+        
+        # Create a directory named after the product for this specific download
+        product_output_dir = os.path.join(output_dir, product_name.replace('.SAFE', ''))
+        os.makedirs(product_output_dir, exist_ok=True)
+        
+        download_product(access_token, product_id, product_name, product_output_dir)
+        print(f"✅ Successfully downloaded {product_name} to {product_output_dir}")
+    else:
+        print(f"❌ Product not found: {product_name}")
+
+
 def main():
-    """Main function to download matching Sentinel-1 and Sentinel-2 images."""
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    parser = argparse.ArgumentParser(description="Download Sentinel-1 and Sentinel-2 products.")
+    parser.add_argument("--aoi", type=str, default=DEFAULT_AOI_WKT, help="Area of Interest (WKT Polygon) for pair search.")
+    parser.add_argument("--start_date", type=str, default=DEFAULT_START_DATE, help="Start Date (ISO 8601) for pair search.")
+    parser.add_argument("--end_date", type=str, default=DEFAULT_END_DATE, help="End Date (ISO 8601) for pair search.")
+    parser.add_argument("--cloud_cover", type=float, default=5.0, help="Max Cloud Cover Percentage for Sentinel-2 in pair search.")
+    parser.add_argument("--output_dir", type=str, default=DEFAULT_OUTPUT_DIR, help="Base Output Directory for all downloads.")
+    parser.add_argument("--username", type=str, default=DEFAULT_USERNAME, help="CDSE Username")
+    parser.add_argument("--password", type=str, default=DEFAULT_PASSWORD, help="CDSE Password")
+    
+    # New arguments for specific product downloads
+    parser.add_argument("--s1_product_name", type=str, help="Full name of a specific Sentinel-1 product to download.")
+    parser.add_argument("--s2_product_name", type=str, help="Full name of a specific Sentinel-2 product to download.")
+    
+    args = parser.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
 
     try:
-        access_token = get_access_token(USERNAME, PASSWORD)
+        access_token = get_access_token(args.username, args.password)
         print("Access token obtained.")
 
-        s2_filter = "Attributes/OData.CSC.DoubleAttribute/any(a:a/Name eq 'cloudCover' and a/Value lt 10)"
-        print("Searching for Sentinel-2 products...")
-        s2_products = search_products(access_token, AOI_WKT, START_DATE, END_DATE, 'SENTINEL-2', extra_filters=s2_filter)
-        print(f"Found {len(s2_products)} Sentinel-2 products.")
+        # Handle specific product downloads if names are provided
+        if args.s1_product_name:
+            download_specific_product(access_token, args.s1_product_name, 'SENTINEL-1', args.output_dir)
+        
+        if args.s2_product_name:
+            download_specific_product(access_token, args.s2_product_name, 'SENTINEL-2', args.output_dir)
 
-        if not s2_products:
-            print("No low-cloud Sentinel-2 products found.")
-            return
+        # If no specific product names are provided, proceed with pair search logic
+        if not args.s1_product_name and not args.s2_product_name:
+            s2_filter = f"Attributes/OData.CSC.DoubleAttribute/any(a:a/Name eq 'cloudCover' and a/Value lt {args.cloud_cover})"
+            print("Searching for Sentinel-2 products (pair search mode)...")
+            s2_products = search_products(access_token, args.aoi, args.start_date, args.end_date, 'SENTINEL-2', extra_filters=s2_filter)
+            print(f"Found {len(s2_products)} Sentinel-2 products.")
 
-        for s2_product in s2_products:
-            s2_name = s2_product['Name']
-            s2_id = s2_product['Id']
-            s2_date_str = s2_product['ContentDate']['Start']
-            s2_date = datetime.strptime(s2_date_str, '%Y-%m-%dT%H:%M:%S.%fZ')
+            if not s2_products:
+                print("No low-cloud Sentinel-2 products found for pair search.")
+                return
 
-            print(f"\nFound Sentinel-2 product: {s2_name} from {s2_date}")
+            # Sort by cloud cover ascending
+            def get_cloud_cover(product):
+                for attr in product['Attributes']:
+                    if attr['Name'] == 'cloudCover':
+                        return attr['Value']
+                return 100.0
+                
+            s2_products.sort(key=get_cloud_cover)
 
-            s1_start_date = (s2_date - timedelta(days=TIME_WINDOW_DAYS)).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
-            s1_end_date = (s2_date + timedelta(days=TIME_WINDOW_DAYS)).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
-            
-            s1_filter = "Attributes/OData.CSC.StringAttribute/any(a:a/Name eq 'productType' and a/Value eq 'GRD')"
-            
-            print(f"Searching for matching Sentinel-1 products between {s1_start_date} and {s1_end_date}...")
-            s1_products = search_products(access_token, AOI_WKT, s1_start_date, s1_end_date, 'SENTINEL-1', extra_filters=s1_filter)
-            print(f"Found {len(s1_products)} Sentinel-1 products.")
+            for s2_product in s2_products:
+                s2_name = s2_product['Name']
+                s2_id = s2_product['Id']
+                s2_date_str = s2_product['ContentDate']['Start']
+                s2_date = datetime.strptime(s2_date_str, '%Y-%m-%dT%H:%M:%S.%fZ')
+                s2_cloud = get_cloud_cover(s2_product)
 
-            if s1_products:
-                s1_product = s1_products[0]
-                s1_name = s1_product['Name']
-                s1_id = s1_product['Id']
-                print(f"Found matching Sentinel-1 product: {s1_name}")
+                print(f"\nFound Sentinel-2 product: {s2_name} from {s2_date} (Cloud: {s2_cloud}%)")
 
-                pair_dir_name = f"{s2_name.split('_')[5]}_{s2_name.split('_')[2]}"
-                pair_dir = os.path.join(OUTPUT_DIR, pair_dir_name)
-                os.makedirs(pair_dir, exist_ok=True)
+                s1_start_date = (s2_date - timedelta(days=DEFAULT_TIME_WINDOW_DAYS)).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+                s1_end_date = (s2_date + timedelta(days=DEFAULT_TIME_WINDOW_DAYS)).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+                
+                s1_filter = "Attributes/OData.CSC.StringAttribute/any(a:a/Name eq 'productType' and a/Value eq 'GRD')"
+                
+                print(f"Searching for matching Sentinel-1 products between {s1_start_date} and {s1_end_date}...")
+                s1_products = search_products(access_token, args.aoi, s1_start_date, s1_end_date, 'SENTINEL-1', extra_filters=s1_filter)
+                print(f"Found {len(s1_products)} Sentinel-1 products.")
 
-                print("\nDownloading matching pair:")
-                try:
-                    download_product(access_token, s2_id, s2_name, pair_dir)
-                    download_product(access_token, s1_id, s1_name, pair_dir)
-                except Exception as e:
-                    print(f"Could not download pair for {s2_name}. Reason: {e}")
+                if s1_products:
+                    s1_product = s1_products[0]
+                    s1_name = s1_product['Name']
+                    s1_id = s1_product['Id']
+                    print(f"Found matching Sentinel-1 product: {s1_name}")
 
-            else:
-                print("No matching Sentinel-1 product found for this Sentinel-2 product.")
+                    pair_dir_name = f"{s2_name.split('_')[5]}_{s2_name.split('_')[2]}"
+                    pair_dir = os.path.join(args.output_dir, pair_dir_name)
+                    os.makedirs(pair_dir, exist_ok=True)
+
+                    print("\nDownloading matching pair:")
+                    try:
+                        download_product(access_token, s2_id, s2_name, pair_dir)
+                        download_product(access_token, s1_id, s1_name, pair_dir)
+                        print(f"✅ Successfully downloaded pair to {pair_dir}")
+                        return # Exit after one successful pair download
+                    except Exception as e:
+                        print(f"Could not download pair for {s2_name}. Reason: {e}")
+
+                else:
+                    print("No matching Sentinel-1 product found for this Sentinel-2 product.")
 
     except requests.exceptions.RequestException as e:
         print(f"An error occurred: {e}")

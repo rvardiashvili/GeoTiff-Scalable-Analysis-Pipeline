@@ -12,8 +12,4 @@ S1_BAND_PATTERN = "S1*.SAFE/measurement/*{band_name}*.tiff"
 
 # Pattern to find Sentinel-2 band files.
 # {band_name} will be replaced with 'B01', 'B02', etc.
-#S2_BAND_PATTERN = "S2*.SAFE/GRANULE/*/IMG_DATA/*{band_name}*.jp2"
-
-# Pattern to find Sentinel-2 band files.
-# {band_name} will be replaced with 'B01', 'B02', etc.
-S2_BAND_PATTERN = "*{band_name}*.jp2"
+S2_BAND_PATTERN = "S2*.SAFE/**/*{band_name}*.jp2"

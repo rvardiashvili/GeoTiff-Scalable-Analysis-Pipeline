@@ -1,0 +1,19 @@
+# @package _global_
+model:
+  _target_: ben_v2.model.BigEarthNetv2_0_ImageClassifier.from_pretrained
+  
+  pretrained_model_name_or_path: "BIFOLD-BigEarthNetv2-0/resnet50-all-v0.2.0"
+  
+  # Model-specific normalization statistics
+  bands: ["VV", "VH", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B11", "B12"]
+
+  # Reverted to original Identity Norm (0, 1) for S1
+  means: [
+    -7.713, -15.435,      # S1 (Approx dB means if input is dB. If Linear, use ~0.13, ~0.05)
+    0.0429, 0.0614, 0.0590, 0.0950, 0.1792, 0.2075, 0.2218, 0.2266, 0.1594, 0.1009
+  ]
+  
+  stds: [
+    3.766, 4.367,         # S1 (Approx dB stds)
+    0.0572, 0.0582, 0.0675, 0.0729, 0.1096, 0.1273, 0.1365, 0.1356, 0.0836, 0.0818
+  ]
