@@ -21,13 +21,14 @@ import rasterio.vrt
 from rasterio.vrt import WarpedVRT
 import re
 
-from . import data_structure
-
 # --- Utility Functions for Chunk Reading ---
 
-def _find_band_path(tile_folder: Path, band_name: str, pattern: str = data_structure.S2_BAND_PATTERN) -> Path | None:
+def _find_band_path(tile_folder: Path, band_name: str, pattern: str) -> Path | None:
     """Finds the path for a given band in the tile folder using a glob pattern."""
     
+    if not pattern:
+        raise ValueError("File pattern must be provided to find bands.")
+
     # If the provided path is already the .SAFE directory, adjust the pattern
     if tile_folder.name.endswith('.SAFE'):
         if 'S2*.SAFE/' in pattern:
@@ -48,6 +49,7 @@ def _read_s1_bands_for_chunk(
     c_start: int, 
     W_chunk: int, 
     H_chunk: int,
+    s1_pattern: str,
     pad_if_needed: bool = False,
     target_size: Optional[Tuple[int, int]] = None,
     bands_list: Optional[List[str]] = None,
@@ -73,6 +75,9 @@ def _read_s1_bands_for_chunk(
 
     if not s1_bands:
         return np.array([]), None, None
+
+    if not s1_pattern:
+         raise ValueError("s1_pattern is required for reading Sentinel-1 data.")
 
     # --- Detect S1 Manifests (for GCP-based alignment) ---
     # Search strategies for S1 Manifest:
@@ -122,7 +127,7 @@ def _read_s1_bands_for_chunk(
                  # S1 structure: .../measurement/s1a-iw-grd-vv-....tiff
                  # We search relative to the manifest's parent folder
                  s1_safe_dir = manifest_path.parent
-                 band_path = _find_band_path(s1_safe_dir, band_name.lower(), data_structure.S1_BAND_PATTERN)
+                 band_path = _find_band_path(s1_safe_dir, band_name.lower(), s1_pattern)
                  if band_path:
                      src = rasterio.open(band_path)
 
@@ -256,6 +261,7 @@ def _read_s2_bands_for_chunk(
     c_start: int, 
     W_chunk: int, 
     H_chunk: int,
+    s2_pattern: str,
     pad_if_needed: bool = False,
     target_size: Optional[Tuple[int, int]] = None,
     bands_list: Optional[List[str]] = None
@@ -270,17 +276,20 @@ def _read_s2_bands_for_chunk(
     if bands_list is None:
          raise ValueError("BANDS list cannot be None.")
     
+    if not s2_pattern:
+         raise ValueError("s2_pattern is required for reading Sentinel-2 data.")
+
     s2_bands = [b for b in bands_list if b not in ['VV', 'VH']]
     ref_band_name = 'B02' 
 
-    ref_band_path = _find_band_path(tile_folder, ref_band_name, data_structure.S2_BAND_PATTERN)
+    ref_band_path = _find_band_path(tile_folder, ref_band_name, s2_pattern)
     if not ref_band_path:
         if not s2_bands:
             raise ValueError("BANDS list is empty.")
         ref_band_name = s2_bands[0]
-        ref_band_path = _find_band_path(tile_folder, ref_band_name, data_structure.S2_BAND_PATTERN)
+        ref_band_path = _find_band_path(tile_folder, ref_band_name, s2_pattern)
         if not ref_band_path:
-             raise FileNotFoundError(f"Missing reference band file for {ref_band_name}")
+             raise FileNotFoundError(f"Missing reference band file for {ref_band_name} using pattern {s2_pattern}")
 
     # We keep the reference open to extract global tile info
     with rasterio.open(ref_band_path) as ref_src:
@@ -301,7 +310,7 @@ def _read_s2_bands_for_chunk(
             offset = -1000.0
     
     for band_name in s2_bands:
-        band_path = _find_band_path(tile_folder, band_name, data_structure.S2_BAND_PATTERN)
+        band_path = _find_band_path(tile_folder, band_name, s2_pattern)
         if not band_path:
             raise FileNotFoundError(f"Missing required band file: {band_name}")
 
@@ -364,16 +373,20 @@ def _read_s2_bands_for_chunk(
 
     return np.stack(band_data_list, axis=0), ref_crs, ref_transform, ref_size
 
-def read_chunk_data(tile_folder: Path, bands_list: List[str], r_start: int, c_start: int, W_chunk: int, H_chunk: int, use_sentinel_1: bool = False) -> np.ndarray:
+def read_chunk_data(tile_folder: Path, bands_list: List[str], r_start: int, c_start: int, W_chunk: int, H_chunk: int, s2_pattern: str, s1_pattern: str = None, use_sentinel_1: bool = False) -> np.ndarray:
     """
     Public wrapper to read a single chunk of Sentinel-2 data.
     """
-    s2_data, s2_crs, s2_transform, s2_size = _read_s2_bands_for_chunk(tile_folder, r_start, c_start, W_chunk, H_chunk, bands_list=bands_list)
+    s2_data, s2_crs, s2_transform, s2_size = _read_s2_bands_for_chunk(tile_folder, r_start, c_start, W_chunk, H_chunk, s2_pattern=s2_pattern, bands_list=bands_list)
     
     if use_sentinel_1:
+        if not s1_pattern:
+             raise ValueError("s1_pattern is required when use_sentinel_1 is True")
+        
         # Pass S2 reference to S1 reader for auto-alignment
         s1_data, _, _ = _read_s1_bands_for_chunk(
             tile_folder, r_start, c_start, W_chunk, H_chunk, 
+            s1_pattern=s1_pattern,
             bands_list=bands_list,
             ref_crs=s2_crs,
             ref_transform=s2_transform,

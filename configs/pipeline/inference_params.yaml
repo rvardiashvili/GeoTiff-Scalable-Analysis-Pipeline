@@ -26,7 +26,7 @@ pipeline:
     
     # Resource allocation per task
     num_gpus_per_worker: 1.0
-    gpu_batch_size: 32
+    gpu_batch_size: "auto"
     data_loader_workers: 4
     prefetch_queue_size: 1 # Number of preprocessed chunks to keep in memory for the GPU
     writer_queue_size: 2 # Size of the queue between Inference and Writer processes
@@ -37,6 +37,7 @@ pipeline:
     save_entropy: true
     save_gap: true
     save_probs: false
+    save_gradient_preview: false # Save probability of target class (for binary models)
     save_preview: true
     preview_downscale_factor: 10
     confidence_threshold: 0.05

@@ -2,6 +2,10 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 import os
 import sys
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 # Adjust path to ensure imports work
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))

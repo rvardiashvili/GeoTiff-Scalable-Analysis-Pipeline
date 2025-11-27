@@ -1,6 +1,6 @@
 # Usage Guide
 
-This guide explains how to run the BigEarthNet v2.0 pipeline using the newly implemented model configurations.
+This guide explains how to run the GeoSpatial Inference Pipeline (GSIP) using the available model configurations.
 
 ## Basic Command Structure
 
@@ -12,7 +12,7 @@ python src/main.py model=<model_config_name> input_path=<path_to_tile> output_pa
 
 ## Available Models
 
-### 1. BigEarthNet ResNet-50 (Sentinel-2 Only)
+### 1. ResNet-50 (Sentinel-2 Only)
 **Config:** `resnet_s2`
 **Description:** Standard classification model using 10 Sentinel-2 bands.
 **Usage:**
@@ -20,7 +20,7 @@ python src/main.py model=<model_config_name> input_path=<path_to_tile> output_pa
 python src/main.py model=resnet_s2 input_path=/path/to/S2_tile output_path=./results
 ```
 
-### 2. BigEarthNet ResNet-50 (Sentinel-1 & Sentinel-2)
+### 2. ResNet-50 (Sentinel-1 & Sentinel-2)
 **Config:** `resnet_all`
 **Description:** Multi-modal classification using 12 bands (2 S1 + 10 S2). **Requires matching Sentinel-1 data** to be present or configured in the data loader.
 **Usage:**
@@ -28,7 +28,7 @@ python src/main.py model=resnet_s2 input_path=/path/to/S2_tile output_path=./res
 python src/main.py model=resnet_all input_path=/path/to/S2_tile output_path=./results
 ```
 
-### 3. BigEarthNet ConvNeXt V2 (Sentinel-2)
+### 3. ConvNeXt V2 (Sentinel-2)
 **Config:** `convnext_s2`
 **Description:** Modern ConvNeXt architecture for classification (10 bands).
 **Usage:**

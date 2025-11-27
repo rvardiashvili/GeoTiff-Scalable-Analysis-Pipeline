@@ -20,7 +20,7 @@ from tqdm import tqdm
 from .inference_engine import InferenceEngine
 # Reuse existing utilities where possible
 from .utils import (
-    NEW_LABELS, LABEL_COLOR_MAP, save_color_mask_preview, get_device
+    NEW_LABELS, LABEL_COLOR_MAP, generate_low_res_preview, get_device
 )
 from .data import _find_band_path
 from .generate_viewer import generate_single_node_viewer
@@ -33,6 +33,7 @@ def writer_process(q: mp.Queue, out_paths: Dict[str, Path], profile_dict: Dict[s
     Independent process to reconstruct map, calculate metrics, and write results.
     Receives raw patch probabilities.
     """
+    t_process_start = time.perf_counter()
     # Pre-calculate sinusoidal window for reconstruction
     window_1d = np.sin(np.linspace(0, np.pi, patch_size))**2
     patch_weight = np.outer(window_1d, window_1d).astype(np.float32)
@@ -65,7 +66,9 @@ def writer_process(q: mp.Queue, out_paths: Dict[str, Path], profile_dict: Dict[s
             # Offloaded from Main Process to distribute load
             # adapter.postprocess expects (tensor, metadata_dict)
             # And returns dict with 'probs_tensor'
+            t_postprocess_start = time.perf_counter()
             post_result = adapter.postprocess((logits_t, metadata))
+            log.debug(f"[{time.perf_counter()-t_postprocess_start:.4f}s] Writer: adapter.postprocess")
             
             results = post_result['probs_tensor'].numpy()
             coords = post_result['coords']
@@ -86,6 +89,7 @@ def writer_process(q: mp.Queue, out_paths: Dict[str, Path], profile_dict: Dict[s
                 n_classes = 1
 
             # --- Reconstruction (CPU Heavy) ---
+            t_reconstruction_start = time.perf_counter()
             avg_probs = np.zeros((n_classes, H_crop, W_crop), dtype=np.float32)
             weight_sum = np.zeros((1, H_crop, W_crop), dtype=np.float32)
             
@@ -110,6 +114,7 @@ def writer_process(q: mp.Queue, out_paths: Dict[str, Path], profile_dict: Dict[s
                 
             weight_sum[weight_sum == 0] = 1.0
             probs_map = avg_probs / weight_sum
+            log.debug(f"[{time.perf_counter()-t_reconstruction_start:.4f}s] Writer: Reconstruction")
 
             # --- Crop Center (ZoR) ---
             if probs_map.ndim == 3:
@@ -138,6 +143,16 @@ def writer_process(q: mp.Queue, out_paths: Dict[str, Path], profile_dict: Dict[s
                 gap = (top2[1] - top2[0]).astype(np.float32)
             else:
                 gap = None
+                
+            if 'gradient' in dsts:
+                # For binary, save Class 1 probability
+                if n_classes == 2:
+                    gradient = valid_probs[1].astype(np.float32)
+                else:
+                    # Fallback/Undefined for multi-class (could be maxprob?)
+                    gradient = None
+            else:
+                gradient = None
             
             # --- Write to Disk ---
             # If chunk start is negative (halo), the valid data (ZoR) starts at c_chunk_start + halo
@@ -157,6 +172,7 @@ def writer_process(q: mp.Queue, out_paths: Dict[str, Path], profile_dict: Dict[s
             if 'conf' in dsts: dsts['conf'].write(conf[:w_height, :w_width], window=window, indexes=1)
             if 'entr' in dsts and entr is not None: dsts['entr'].write(entr[:w_height, :w_width], window=window, indexes=1)
             if 'gap' in dsts and gap is not None: dsts['gap'].write(gap[:w_height, :w_width], window=window, indexes=1)
+            if 'gradient' in dsts and gradient is not None: dsts['gradient'].write(gradient[:w_height, :w_width], window=window, indexes=1)
             
             pbar.update(1)
 
@@ -168,6 +184,7 @@ def writer_process(q: mp.Queue, out_paths: Dict[str, Path], profile_dict: Dict[s
         pbar.close()
         for dst in dsts.values():
             dst.close()
+    log.info(f"Writer process finished in {time.perf_counter() - t_process_start:.2f}s")
 
 
 def main_hydra(cfg: DictConfig):
@@ -185,7 +202,8 @@ def main_hydra(cfg: DictConfig):
     log.info(f"Output directory: {output_path}")
     
     # Get Tile Dimensions
-    ref_path = _find_band_path(tile_path, 'B02')
+    s2_pattern = cfg.data_source.get('s2_file_pattern', "S2*.SAFE/**/*{band_name}*.jp2")
+    ref_path = _find_band_path(tile_path, 'B02', s2_pattern)
     with rasterio.open(ref_path) as src:
         H_full, W_full = src.shape
         profile = src.profile.copy()
@@ -207,6 +225,12 @@ def main_hydra(cfg: DictConfig):
         # Inject pipeline defaults if missing in adapter params
         if 'params' not in adapter_cfg:
             adapter_cfg['params'] = {}
+
+        # Inject file patterns from data_source
+        if 's2_file_pattern' in cfg.data_source:
+            adapter_cfg['params']['s2_file_pattern'] = cfg.data_source.s2_file_pattern
+        if 's1_file_pattern' in cfg.data_source:
+            adapter_cfg['params']['s1_file_pattern'] = cfg.data_source.s1_file_pattern
             
         # Use pipeline defaults if not set in adapter
         # Note: The adapter might have its own hard defaults if these are None
@@ -231,7 +255,9 @@ def main_hydra(cfg: DictConfig):
             'patch_size': cfg.pipeline.tiling.get('patch_size', 120),
             'stride': cfg.pipeline.tiling.get('patch_stride', 60),
             'gpu_batch_size': cfg.pipeline.distributed.get('gpu_batch_size', 32),
-            'device': 'cuda' if torch.cuda.is_available() else 'cpu'
+            'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+            's2_file_pattern': cfg.data_source.get('s2_file_pattern'),
+            's1_file_pattern': cfg.data_source.get('s1_file_pattern')
         }
         
         adapter_cfg = {
@@ -315,6 +341,11 @@ def main_hydra(cfg: DictConfig):
         'class': output_path / f"{tile_path.name}_class.tif",
         'conf': output_path / f"{tile_path.name}_maxprob.tif",
     }
+    
+    # Gradient Preview: Saves Class 1 probability for binary models (visualizes detection confidence)
+    if cfg.pipeline.output.get('save_gradient_preview', False) and num_classes == 2:
+        out_paths['gradient'] = output_path / f"{tile_path.name}_gradient.tif"
+        
     if cfg.pipeline.output.save_entropy:
         out_paths['entr'] = output_path / f"{tile_path.name}_entropy.tif"
     if cfg.pipeline.output.save_gap:
@@ -359,8 +390,11 @@ def main_hydra(cfg: DictConfig):
             }
             
             # Run CPU-bound preprocessing
+            t_preprocess_start = time.perf_counter()
             try:
-                yield engine.preprocess(raw_input)
+                processed_input = engine.preprocess(raw_input)
+                log.debug(f"[{time.perf_counter()-t_preprocess_start:.4f}s] Main: engine.preprocess for chunk ({r},{c})")
+                yield processed_input
             except Exception as e:
                 log.error(f"Preprocessing error at {r}, {c}: {e}")
                 raise e
@@ -412,7 +446,9 @@ def main_hydra(cfg: DictConfig):
                 break # Done or Error # Done or Error
             
             # 2. Predict (GPU) - RAW Output (logits, metadata)
+            t_predict_raw_start = time.perf_counter()
             logits_t, metadata = engine.predict_raw(model_input)
+            log.debug(f"[{time.perf_counter()-t_predict_raw_start:.4f}s] Main: engine.predict_raw")
             
             # 3. Pass to Writer (CPU)
             # We pass the raw logits and the metadata. 
@@ -440,7 +476,21 @@ def main_hydra(cfg: DictConfig):
             log.error(f"Writer process exited with error code {writer_p.exitcode}. Output files may be incomplete.")
 
     # Metadata
-    class_map = {label: {"index": i, "color": c.tolist()} for i, (label, c) in enumerate(zip(NEW_LABELS, LABEL_COLOR_MAP.values()))}
+    # Use adapter labels/colormap if available, else fallback to globals
+    if adapter.labels:
+        labels = adapter.labels
+        color_map = adapter.color_map
+    else:
+        labels = NEW_LABELS
+        color_map = LABEL_COLOR_MAP
+
+    class_map = {
+        label: {
+            "index": i, 
+            "color": color_map.get(label, [128,128,128]) if isinstance(color_map.get(label), list) else color_map.get(label, np.array([128,128,128])).tolist()
+        } 
+        for i, label in enumerate(labels)
+    }
     with open(output_path / f"{tile_path.name}_classmap.json", "w") as f:
         json.dump(class_map, f)
 
@@ -451,7 +501,14 @@ def main_hydra(cfg: DictConfig):
             class_path = out_paths['class']
             if class_path.exists():
                 with rasterio.open(class_path) as src:
-                    save_color_mask_preview(src.read(1), output_path / "preview.png", save_preview=save_preview, downscale_factor=downscale)
+                    generate_low_res_preview(
+                        src.read(1), 
+                        output_path / "preview.png", 
+                        save_preview=save_preview, 
+                        downscale_factor=downscale,
+                        labels=labels,
+                        color_map=color_map
+                    )
             else:
                 log.warning(f"Class map file not found at {class_path}. Skipping preview generation.")
         except Exception as e:

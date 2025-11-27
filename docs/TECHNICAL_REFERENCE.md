@@ -1,15 +1,15 @@
-# Technical Reference Manual: BigEarthNet v2.0 Scalable Analysis Pipeline
+# Technical Reference Manual: GeoSpatial Inference Pipeline (GSIP)
 
 **Version:** 2.0.0
 **Date:** November 2025
-**System Architecture:** Tiling-Error-Free Multi-Modal Segmentation Engine
+**System Architecture:** A Scalable and Multi-Modal Inference Engine
 
 ---
 
 ## 1. Introduction
 
 ### 1.1 System Overview
-The BigEarthNet v2.0 Scalable Analysis Pipeline is a high-performance computing (HPC) framework designed for the semantic segmentation of gigapixel-scale satellite imagery. Unlike standard computer vision tasks that operate on fixed-size images (e.g., $512 \times 512$), Earth Observation (EO) data arrives in massive "tiles" (e.g., Sentinel-2 granules are $10,980 \times 10,980$ pixels).
+The GeoSpatial Inference Pipeline (GSIP) is a high-performance computing (HPC) framework designed for the semantic segmentation of gigapixel-scale satellite imagery. Unlike standard computer vision tasks that operate on fixed-size images (e.g., $512 \times 512$), Earth Observation (EO) data arrives in massive "tiles" (e.g., Sentinel-2 granules are $10,980 \times 10,980$ pixels).
 
 This system addresses four critical engineering challenges in EO Deep Learning:
 1.  **Memory Management:** Processing images exceeding GPU VRAM capacity (20GB+ uncompressed).
@@ -69,7 +69,7 @@ Raw S1 Amplitude ($A$) is distributed exponentially and is unsuitable for CNNs. 
 
 $$ \sigma^0_{dB} = 20 \cdot \log_{10}(A) - K_{calib} $$
 
-*   $K_{calib}$: Calibration constant (set to **50.0** in `src/ben_v2/data.py` to align mean statistics with BigEarthNet distributions).
+*   $K_{calib}$: Calibration constant (set to **50.0** in `src/eo_core/data.py` to align mean statistics with BigEarthNet distributions).
 
 #### 2.2.3 Dynamic Range Clipping
 SAR data contains extreme outliers due to specular reflections (e.g., skyscrapers acting as corner reflectors).
@@ -207,7 +207,6 @@ The entire pipeline is controlled via hierarchical YAML configurations using **H
 ### 7.2 Model Parameters (`configs/model/*.yaml`)
 | Parameter | Key | Definition |
 | :--- | :--- | :--- |
-| **Target** | `_target_` | Class path for dynamic instantiation (e.g., `ben_v2.model.BigEarthNetv2_0_ImageClassifier`). |
 | **Adapter** | `adapter` | Configuration block for the model adapter (see below). |
 
 ### 7.3 Adapter Configuration
@@ -220,7 +219,7 @@ Adapters decouple the pipeline from specific model architectures.
 
 ## 8. Multi-Modal Deep Learning Fusion
 
-For configurations enabling fusion (`use_sentinel_1: true`), the pipeline utilizes the `DeepLearningRegistrationPipeline` module (`src/ben_v2/fusion.py`).
+For configurations enabling fusion (`use_sentinel_1: true`), the pipeline utilizes the `DeepLearningRegistrationPipeline` module (`src/eo_core/fusion.py`).
 
 ### 8.1 Spatial Transformer Network (STN) Flow
 Instead of relying solely on geometric GCP alignment, this module allows for feature-based alignment:

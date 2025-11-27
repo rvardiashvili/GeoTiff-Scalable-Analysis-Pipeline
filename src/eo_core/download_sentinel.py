@@ -13,9 +13,9 @@ DEFAULT_USERNAME = os.environ.get("CDSE_USERNAME", "vardiashvilirati33@gmail.com
 DEFAULT_PASSWORD = os.environ.get("CDSE_PASSWORD", "/C9&z2ha/e6VYnV")
 # Venice, Italy (Approximate Bounding Box)
 # 12.20 45.30 to 12.50 45.60
-DEFAULT_AOI_WKT = "POLYGON((12.20 45.30, 12.50 45.30, 12.50 45.60, 12.20 45.60, 12.20 45.30))" 
-DEFAULT_START_DATE = "2023-06-01T00:00:00.000Z"
-DEFAULT_END_DATE = "2023-08-30T23:59:59.999Z"
+DEFAULT_AOI_WKT = "POLYGON((22.58 32.74, 22.84 32.74, 22.84 32.96, 22.58 32.96, 22.58 32.74))" 
+DEFAULT_START_DATE = "2023-09-01T00:00:00.000Z"
+DEFAULT_END_DATE = "2023-09-30T23:59:59.999Z"
 DEFAULT_OUTPUT_DIR = "/home/rati/bsc_thesis/sentinel-2/"
 DEFAULT_TIME_WINDOW_DAYS = 2
 MAX_RETRIES = 3
@@ -163,6 +163,7 @@ def main():
     # New arguments for specific product downloads
     parser.add_argument("--s1_product_name", type=str, help="Full name of a specific Sentinel-1 product to download.")
     parser.add_argument("--s2_product_name", type=str, help="Full name of a specific Sentinel-2 product to download.")
+    parser.add_argument("--download_one_s2", action="store_true", help="Download only one Sentinel-2 product (and its potential S1 pair).")
     
     args = parser.parse_args()
 
@@ -232,12 +233,15 @@ def main():
                         download_product(access_token, s2_id, s2_name, pair_dir)
                         download_product(access_token, s1_id, s1_name, pair_dir)
                         print(f"✅ Successfully downloaded pair to {pair_dir}")
-                        return # Exit after one successful pair download
+                        if args.download_one_s2:
+                            return # Exit after one successful pair download if flag is set
                     except Exception as e:
                         print(f"Could not download pair for {s2_name}. Reason: {e}")
-
                 else:
                     print("No matching Sentinel-1 product found for this Sentinel-2 product.")
+                
+                if args.download_one_s2: # If only one S2 is requested, break after checking this one.
+                    break
 
     except requests.exceptions.RequestException as e:
         print(f"An error occurred: {e}")

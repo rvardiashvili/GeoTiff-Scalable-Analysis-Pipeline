@@ -14,3 +14,7 @@ data_source:
   
   use_sentinel_1: false
   s1_bands: ['VV', 'VH']
+  
+  # File structure patterns
+  s2_file_pattern: "S2*.SAFE/**/*{band_name}*.jp2"
+  s1_file_pattern: "S1*.SAFE/measurement/*{band_name}*.tiff"

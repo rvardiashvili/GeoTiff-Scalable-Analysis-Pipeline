@@ -1,6 +1,11 @@
 import psutil
 import math
-from typing import Tuple, Union
+import torch
+import gc
+import logging
+from typing import Tuple, Union, Any
+
+log = logging.getLogger(__name__)
 
 def calculate_optimal_zor(
     halo: int = 128, 
@@ -135,3 +140,83 @@ def resolve_zor(zor_config: Union[int, str], halo: int, patch_size: int = 120, *
         except:
             print(f"⚠️ Invalid ZoR config, defaulting to {patch_size * 10}")
             return patch_size * 10
+
+def estimate_optimal_batch_size(model: torch.nn.Module, input_shape: Tuple[int, ...], device: torch.device, safety_factor: float = 0.85) -> int:
+    """
+    Estimates the optimal batch size for the given model and input shape by binary search
+    or heuristic to fill GPU memory.
+    
+    Args:
+        model: The PyTorch model (should be on 'device').
+        input_shape: Shape of a SINGLE sample (C, H, W) or (C, T, H, W).
+        device: The target device.
+        safety_factor: Fraction of available memory to use (default 0.85).
+        
+    Returns:
+        Recommended batch size (int).
+    """
+    if device.type == 'cpu':
+        return 16 # Conservative default for CPU
+        
+    try:
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        
+        total_mem = torch.cuda.get_device_properties(device).total_memory
+        # Get currently allocated to subtract
+        allocated = torch.cuda.memory_allocated(device)
+        reserved = torch.cuda.memory_reserved(device)
+        free_mem = total_mem - allocated # We use allocated because reserved can be reused
+        
+        target_mem = free_mem * safety_factor
+        
+        # Move model to device if not already (though it should be)
+        model.to(device)
+        
+        # 1. Measure memory for Batch=1
+        # Ensure correct dtype (Float32 is standard)
+        dummy_input_1 = torch.zeros((1, *input_shape), device=device, dtype=torch.float32)
+        
+        torch.cuda.reset_peak_memory_stats(device)
+        with torch.no_grad():
+            _ = model(dummy_input_1)
+        max_mem_1 = torch.cuda.max_memory_allocated(device)
+        
+        # 2. Measure memory for Batch=4 (to get a better slope)
+        # If we can't even fit 4, we fallback to 1.
+        try:
+            dummy_input_4 = torch.zeros((4, *input_shape), device=device, dtype=torch.float32)
+            torch.cuda.reset_peak_memory_stats(device)
+            with torch.no_grad():
+                _ = model(dummy_input_4)
+            max_mem_4 = torch.cuda.max_memory_allocated(device)
+            
+            # Marginal cost per sample = (Mem4 - Mem1) / (4 - 1)
+            # This removes fixed overheads (weights, kernels context)
+            mem_per_sample = (max_mem_4 - max_mem_1) / 3.0
+            
+            # Base overhead
+            fixed_overhead = max_mem_1 - mem_per_sample
+            
+        except RuntimeError:
+            # OOM at batch 4? Fallback to simple estimation
+            mem_per_sample = max_mem_1 - allocated
+            fixed_overhead = allocated
+
+        if mem_per_sample <= 0:
+            mem_per_sample = 10 * 1024 * 1024 # Fallback 10MB
+            
+        # Estimate max batch: (Target - Fixed) / Marginal
+        estimated_bs = int((target_mem - (fixed_overhead - allocated)) / mem_per_sample)
+        
+        # Sanity checks
+        estimated_bs = max(1, estimated_bs)
+        estimated_bs = min(estimated_bs, 4096) 
+        
+        log.info(f"🧠 Auto-Batch Estimation: Free={free_mem/1e9:.2f}GB, MarginalMem={mem_per_sample/1e6:.2f}MB/sample -> BatchSize={estimated_bs}")
+        
+        return estimated_bs
+        
+    except Exception as e:
+        log.warning(f"⚠️ Auto-batch estimation failed ({e}). Defaulting to 1.")
+        return 1

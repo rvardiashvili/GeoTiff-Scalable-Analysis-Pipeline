@@ -7,7 +7,7 @@ This document explains how to modify and extend the code, focusing on the new Ad
 Thanks to the Adapter pattern, you don't need to modify the core pipeline logic to add a new model type.
 
 ### 1. Create a New Adapter
-Create a file in `src/ben_v2/adapters/` (e.g., `my_custom_adapter.py`).
+Create a file in `src/eo_core/adapters/` (e.g., `my_custom_adapter.py`).
 Inherit from `BaseAdapter` and implement the required methods and properties:
 
 ```python
@@ -57,7 +57,7 @@ Create a YAML file in `configs/model/` (e.g., `my_model.yaml`). Point it to your
 # @package _global_
 model:
   adapter:
-    path: "ben_v2.adapters.my_custom_adapter"
+    path: "eo_core.adapters.my_custom_adapter"
     class: "MyCustomAdapter"
     params:
       some_param: 123
@@ -72,13 +72,13 @@ python src/main.py model=my_model input_path=...
 ## Modifying the Core Pipeline
 
 If you need to change how tiling works (e.g., switching from squares to hexagons, or changing the writer logic):
-*   **Tiling Logic:** Modify `src/ben_v2/process.py` inside `main_hydra`.
-*   **Writing Logic:** Modify `src/ben_v2/process.py` inside `writer_process`.
+*   **Tiling Logic:** Modify `src/eo_core/process.py` inside `main_hydra`.
+*   **Writing Logic:** Modify `src/eo_core/process.py` inside `writer_process`.
 
 ## modifying Data Loading
 
-*   **Sentinel-2 Reading:** `src/ben_v2/data.py` -> `_read_s2_bands_for_chunk`
-*   **Sentinel-1 Reading:** `src/ben_v2/data.py` -> `_read_s1_bands_for_chunk`
+*   **Sentinel-2 Reading:** `src/eo_core/data.py` -> `_read_s2_bands_for_chunk`
+*   **Sentinel-1 Reading:** `src/eo_core/data.py` -> `_read_s1_bands_for_chunk`
 
 ## Git Workflow
 

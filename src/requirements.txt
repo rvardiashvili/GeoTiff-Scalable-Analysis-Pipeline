@@ -12,3 +12,8 @@ hydra-core
 ray
 omegaconf
 transformers
+lmdb
+psutil
+pandas
+safetensors
+timm

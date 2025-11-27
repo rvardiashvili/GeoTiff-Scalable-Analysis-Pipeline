@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any, Dict, List
 import torch.nn as nn
 
 class BaseAdapter(ABC):
@@ -71,3 +71,13 @@ class BaseAdapter(ABC):
     def is_segmentation(self) -> bool:
         """True if model outputs a map (N, C, H, W), False if vector (N, C)."""
         return False
+
+    @property
+    def labels(self) -> List[str]:
+        """List of class labels."""
+        return []
+
+    @property
+    def color_map(self) -> Dict[str, Any]:
+        """Dictionary mapping label names to RGB colors."""
+        return {}

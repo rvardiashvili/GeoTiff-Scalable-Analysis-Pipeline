@@ -1,6 +1,6 @@
-# BigEarthNet v2.0 Scalable Analysis Pipeline
+# GeoSpatial Inference Pipeline (GSIP)
 
-This project provides a scalable, multi-modal deep learning pipeline for land cover classification and segmentation of gigapixel-scale satellite imagery (Sentinel-1 and Sentinel-2).
+This project provides a scalable, multi-modal deep learning pipeline for robust and efficient inference on gigapixel-scale Earth Observation (EO) data, focusing on tasks like land cover classification and segmentation.
 
 ## 📚 Documentation
 

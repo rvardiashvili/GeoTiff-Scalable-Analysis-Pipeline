@@ -4,7 +4,7 @@ This document details the key functions and classes in the codebase, explaining 
 
 ---
 
-## `src/ben_v2/inference_engine.py`
+## `src/eo_core/inference_engine.py`
 
 ### `class InferenceEngine`
 **Reason:** Decouples the generic tiling pipeline from specific model architectures. It acts as a facade that standardizes `run()` calls.
@@ -24,7 +24,7 @@ This document details the key functions and classes in the codebase, explaining 
 
 ---
 
-## `src/ben_v2/adapters/base.py`
+## `src/eo_core/adapters/base.py`
 
 ### `class BaseAdapter(ABC)`
 **Reason:** Defines the contract that all model adapters must follow.
@@ -40,7 +40,7 @@ This document details the key functions and classes in the codebase, explaining 
 
 ---
 
-## `src/ben_v2/process.py`
+## `src/eo_core/process.py`
 
 ### `writer_process(...)`
 **Reason:** A dedicated background process for CPU-intensive tasks to prevent blocking the GPU inference loop.
@@ -66,7 +66,7 @@ This document details the key functions and classes in the codebase, explaining 
 
 ---
 
-## `src/ben_v2/memory_utils.py`
+## `src/eo_core/memory_utils.py`
 
 ### `calculate_optimal_zor(...)`
 **Reason:** Determines the maximum safe chunk size (Zone of Responsibility) to prevent OOM crashes.
@@ -96,7 +96,7 @@ This document details the key functions and classes in the codebase, explaining 
 
 ---
 
-## `src/ben_v2/data.py`
+## `src/eo_core/data.py`
 
 ### `class BigEarthNetAdapter(BaseAdapter)`
 **Reason:** Implements the adapter for BigEarthNet-trained Image Classification models (ResNet, ConvNeXt, etc.).
@@ -114,7 +114,7 @@ This document details the key functions and classes in the codebase, explaining 
 
 ---
 
-## `src/ben_v2/adapters/prithvi_adapter.py`
+## `src/eo_core/adapters/prithvi_adapter.py`
 
 ### `class PrithviAdapter(BaseAdapter)`
 **Reason:** Implements the adapter for the Prithvi-100M Semantic Segmentation model.
@@ -131,7 +131,7 @@ This document details the key functions and classes in the codebase, explaining 
 
 ---
 
-## `src/ben_v2/process.py`
+## `src/eo_core/process.py`
 
 ### `writer_process(...)`
 **Reason:** A dedicated background process for CPU-intensive tasks to prevent blocking the GPU inference loop.
@@ -154,7 +154,7 @@ This document details the key functions and classes in the codebase, explaining 
 
 ---
 
-## `src/ben_v2/data.py`
+## `src/eo_core/data.py`
 
 ### `_read_s2_bands_for_chunk(...)`
 **Reason:** Efficiently reads specific regions of Sentinel-2 images.
@@ -169,7 +169,7 @@ This document details the key functions and classes in the codebase, explaining 
 
 ---
 
-## `src/ben_v2/adapters/wrappers.py`
+## `src/eo_core/adapters/wrappers.py`
 
 ### `class MetadataPassingWrapper(nn.Module)`
 **Reason:** A utility wrapper to handle the mismatch between "Logical Batch" (Full Chunk) and "Physical Batch" (GPU limit).
