@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 # Adjust path to ensure imports work
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from ben_v2.process import main_hydra
+from eo_core.process import main_hydra
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig):

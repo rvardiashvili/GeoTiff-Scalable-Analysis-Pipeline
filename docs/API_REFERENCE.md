@@ -121,11 +121,7 @@ This document details the key functions and classes in the codebase, explaining 
 *   `min_batch_size`: The lower limit for the batch size search.
 *   `device`: The device on which the model will run (e.g., "cuda").
 
-**Logic:** The function iteratively attempts to run a forward pass with increasing batch sizes. It catches CUDA OOM errors to identify the maximum sustainable batch size. This process involves:
-1.  Initializing a small batch size.
-2.  Attempting a forward pass with dummy data.
-3.  If successful, increasing the batch size; if it fails due to OOM, reducing the batch size.
-4.  Refining the search using a binary search-like approach or linear scan until an optimal batch size is found or limits are reached.
+**Logic:** The function heuristically estimates the optimal batch size by probing the GPU's memory consumption. It performs a forward pass with a batch size of 1 and then a batch size of 4 (if successful) to measure peak memory usage. From these two points, it calculates the marginal memory cost per sample, allowing it to extrapolate and estimate the maximum batch size that fits within a safe fraction of the available GPU memory. This approach aims to accurately separate fixed model overheads from per-sample activation memory costs. The estimated batch size is capped at 4096.
 
 **Output:** An integer representing the estimated optimal GPU batch size.
 

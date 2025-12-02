@@ -51,6 +51,15 @@ def writer_process(q: mp.Queue, out_paths: Dict[str, Path], profile_dict: Dict[s
                     p.update(dtype='uint8', nodata=255)
                 else:
                     p.update(dtype='float32', nodata=None)
+                
+                # Explicitly delete existing file to prevent rasterio/GDAL errors
+                # when overwriting potentially corrupted/empty files
+                if path.exists():
+                    try:
+                        path.unlink()
+                    except OSError as e:
+                        log.warning(f"Could not delete existing file {path}: {e}")
+
                 Path(path).parent.mkdir(parents=True, exist_ok=True)
                 dsts[key] = rasterio.open(path, 'w', **p)
 
@@ -474,6 +483,10 @@ def main_hydra(cfg: DictConfig):
         
         if writer_p.exitcode is not None and writer_p.exitcode != 0:
             log.error(f"Writer process exited with error code {writer_p.exitcode}. Output files may be incomplete.")
+
+        # Explicitly release GPU memory
+        if 'engine' in locals():
+            engine.cleanup()
 
     # Metadata
     # Use adapter labels/colormap if available, else fallback to globals

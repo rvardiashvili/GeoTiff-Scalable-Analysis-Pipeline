@@ -93,3 +93,13 @@ class InferenceEngine:
         
         # 2. Predict (Inference + Postprocess)
         return self.predict(model_input)
+
+    def cleanup(self):
+        """
+        Releases resources, specifically the model on GPU.
+        """
+        if hasattr(self, 'model'):
+            del self.model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        log.info("InferenceEngine resources released.")
