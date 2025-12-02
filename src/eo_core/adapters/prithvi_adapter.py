@@ -16,7 +16,7 @@ if root_path not in sys.path:
     sys.path.append(root_path)
 
 try:
-    from prithvi_mae import PrithviViT
+    from ..adapters.prithvi_mae import PrithviViT
 except ImportError:
     # Fallback or error if not found
     PrithviViT = None
@@ -32,7 +32,7 @@ class ConvModule(nn.Module):
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, padding=padding, bias=False)
         self.bn = nn.BatchNorm2d(out_channels)
         self.activate = nn.ReLU(inplace=True)
-    
+
     def forward(self, x):
         x = self.conv(x)
         x = self.bn(x)
@@ -47,7 +47,7 @@ class CustomFCNHead(nn.Module):
         ])
         self.dropout = nn.Dropout(0.1)
         self.conv_seg = nn.Conv2d(channels, num_classes, kernel_size=1)
-        
+
     def forward(self, x):
         # x is list of tensors, take last
         if isinstance(x, (list, tuple)):
@@ -62,7 +62,7 @@ class PrithviSegmentor(nn.Module):
         super().__init__()
         self.backbone = backbone
         self.decode_head = decode_head
-    
+
     def forward(self, x):
         features = self.backbone.forward_features(x)
         features = self.backbone.prepare_features_for_image_model(features)
@@ -74,12 +74,12 @@ class PrithviAdapter(BaseAdapter):
         super().__init__(params)
         if PrithviViT is None:
             raise ImportError("Could not import PrithviViT from prithvi_mae.py. Make sure it is in the project root.")
-            
+
     def build_model(self) -> nn.Module:
         t_start = time.perf_counter()
         model_id = self.params.get('model_name_or_path', "ibm-nasa-geospatial/Prithvi-EO-1.0-100M-sen1floods11")
         filename = self.params.get('model_filename', "sen1floods11_Prithvi_100M.pth")
-        
+
         log.debug(f"[{time.perf_counter()-t_start:.4f}s] Starting weight download...")
         local_checkpoint_path = self.params.get('local_checkpoint_path')
         if local_checkpoint_path:
@@ -99,7 +99,7 @@ class PrithviAdapter(BaseAdapter):
                     f"Please check your internet connection or provide a 'local_checkpoint_path' in your config. "
                     f"Original error: {e}"
                 )
-            
+
         log.debug(f"[{time.perf_counter()-t_start:.4f}s] Building backbone...")
         # Build Backbone
         backbone_params = self.params.get('backbone_params', {})
@@ -113,7 +113,7 @@ class PrithviAdapter(BaseAdapter):
             num_heads=backbone_params.get('num_heads', 12),
             mlp_ratio=backbone_params.get('mlp_ratio', 4.0),
         )
-        
+
         log.debug(f"[{time.perf_counter()-t_start:.4f}s] Building head...")
         # Build Head
         head_params = self.params.get('head_params', {})
@@ -122,38 +122,38 @@ class PrithviAdapter(BaseAdapter):
             channels=head_params.get('channels', 256),
             num_classes=head_params.get('num_classes', 2)
         )
-        
+
         model = PrithviSegmentor(backbone, head)
-        
+
         # Load weights
         device_str = self.params.get('device', 'cuda' if torch.cuda.is_available() else 'cpu')
         device = torch.device(device_str)
-        
+
         log.info(f"[{time.perf_counter()-t_start:.4f}s] Loading weights from {checkpoint_path}")
         state_dict = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         if 'state_dict' in state_dict:
             state_dict = state_dict['state_dict']
-            
+
         # Filter strict=False for auxiliary head or other keys we implemented differently
         # Our CustomFCNHead should match 'decode_head' keys.
         # Backbone matches 'backbone' keys.
-        
+
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         if missing:
             # It is expected to miss auxiliary_head
             log.debug(f"[{time.perf_counter()-t_start:.4f}s] Missing keys (expected if aux head missing): {len(missing)}")
             # print(missing[:5])
-        
+
         model.to(device)
-        
+
         means = self.params.get('means', [0.0] * 6)
         stds = self.params.get('stds', [1.0] * 6)
-        
+
         norm_m = torch.tensor(means, dtype=torch.float32).view(len(means), 1, 1)
         norm_s = torch.tensor(stds, dtype=torch.float32).view(len(stds), 1, 1)
-        
+
         batch_size = self.params.get('batch_size', 8)
-        
+
         if batch_size == "auto":
             input_shape = (self.num_bands, self.patch_size, self.patch_size)
             batch_size = estimate_optimal_batch_size(model, input_shape, device)
@@ -170,29 +170,29 @@ class PrithviAdapter(BaseAdapter):
         c = raw_input['c_start']
         w = raw_input['w_read']
         h = raw_input['h_read']
-        
+
         # Prithvi Bands: Blue, Green, Red, Narrow NIR (B8A), SWIR 1, SWIR 2
         bands_needed = self.params.get('bands', ['B02', 'B03', 'B04', 'B8A', 'B11', 'B12'])
-        
+
         # Read Data
         s2_pattern = self.params.get('s2_file_pattern', "S2*.SAFE/**/*{band_name}*.jp2")
         s2_data, s2_crs, s2_transform, s2_size = _read_s2_bands_for_chunk(
             tile_folder, r, c, w, h, s2_pattern=s2_pattern, pad_if_needed=True, bands_list=bands_needed
         )
-        
+
         # Check range. If max > 100, likely 0-10000.
         if s2_data.max() > 100:
              s2_data = s2_data.astype(np.float32) / 10000.0
-        
+
         # Cut into patches
         patch_size = self.params.get('patch_size', 224)
         stride = self.params.get('stride', 112)
-        
+
         patches, coords, H_crop, W_crop, _ = cut_into_patches(s2_data, patch_size, stride=stride)
-        
+
         metadata = {
-            'coords': coords, 
-            'H_crop': H_crop, 
+            'coords': coords,
+            'H_crop': H_crop,
             'W_crop': W_crop,
             'original_r': r,
             'original_c': c,
@@ -204,15 +204,15 @@ class PrithviAdapter(BaseAdapter):
     def postprocess(self, model_output: Tuple[torch.Tensor, Dict[str, Any]]) -> Dict[str, Any]:
         t_start = time.perf_counter()
         probs_tensor, metadata = model_output
-        
+
         # Upsample if needed to match patch size
         patch_size = self.params.get('patch_size', 224)
-        
+
         if probs_tensor.shape[-1] != patch_size:
              probs_tensor = nn.functional.interpolate(
-                 probs_tensor, 
-                 size=(patch_size, patch_size), 
-                 mode='bilinear', 
+                 probs_tensor,
+                 size=(patch_size, patch_size),
+                 mode='bilinear',
                  align_corners=False
              )
         log.debug(f"[{time.perf_counter()-t_start:.4f}s] PrithviAdapter postprocess finished.")

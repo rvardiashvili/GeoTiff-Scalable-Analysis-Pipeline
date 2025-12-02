@@ -38,11 +38,11 @@ def writer_process(q: mp.Queue, out_paths: Dict[str, Path], profile_dict: Dict[s
     window_1d = np.sin(np.linspace(0, np.pi, patch_size))**2
     patch_weight = np.outer(window_1d, window_1d).astype(np.float32)
     patch_weight = patch_weight[np.newaxis, :, :] # (1, P, P)
-    
+
     # Open files
     dsts = {}
     pbar = tqdm(total=total_chunks, desc="Writing  ", position=1, leave=True)
-    
+
     try:
         for key, path in out_paths.items():
             if path:
@@ -58,10 +58,10 @@ def writer_process(q: mp.Queue, out_paths: Dict[str, Path], profile_dict: Dict[s
             item = q.get()
             if item is None:
                 break
-            
+
             # Unpack raw model output and metadata
             logits_t, metadata = item
-            
+
             # --- Postprocessing (CPU) ---
             # Offloaded from Main Process to distribute load
             # adapter.postprocess expects (tensor, metadata_dict)
@@ -69,14 +69,14 @@ def writer_process(q: mp.Queue, out_paths: Dict[str, Path], profile_dict: Dict[s
             t_postprocess_start = time.perf_counter()
             post_result = adapter.postprocess((logits_t, metadata))
             log.debug(f"[{time.perf_counter()-t_postprocess_start:.4f}s] Writer: adapter.postprocess")
-            
+
             results = post_result['probs_tensor'].numpy()
             coords = post_result['coords']
             H_crop = post_result['H_crop']
             W_crop = post_result['W_crop']
             r_chunk_start = post_result['r_chunk']
             c_chunk_start = post_result['c_chunk']
-            
+
             # Determine N_classes from results shape
             # Classification: (N, C)
             # Segmentation: (N, C, H, W)
@@ -92,7 +92,7 @@ def writer_process(q: mp.Queue, out_paths: Dict[str, Path], profile_dict: Dict[s
             t_reconstruction_start = time.perf_counter()
             avg_probs = np.zeros((n_classes, H_crop, W_crop), dtype=np.float32)
             weight_sum = np.zeros((1, H_crop, W_crop), dtype=np.float32)
-            
+
             idx = 0
             for r_p, c_p in coords:
                 # Handle diff shapes
@@ -107,11 +107,11 @@ def writer_process(q: mp.Queue, out_paths: Dict[str, Path], profile_dict: Dict[s
 
                 # Multiply by weight (broadcasts automatically)
                 patch_prob = patch_data * patch_weight
-                
+
                 avg_probs[:, r_p:r_p+patch_size, c_p:c_p+patch_size] += patch_prob
                 weight_sum[:, r_p:r_p+patch_size, c_p:c_p+patch_size] += patch_weight
                 idx += 1
-                
+
             weight_sum[weight_sum == 0] = 1.0
             probs_map = avg_probs / weight_sum
             log.debug(f"[{time.perf_counter()-t_reconstruction_start:.4f}s] Writer: Reconstruction")
@@ -127,23 +127,23 @@ def writer_process(q: mp.Queue, out_paths: Dict[str, Path], profile_dict: Dict[s
 
             # --- Metrics Calculation (CPU Heavy) ---
             dom = np.argmax(valid_probs, axis=0).astype(np.uint8)
-            
+
             if 'conf' in dsts:
                 conf = np.max(valid_probs, axis=0).astype(np.float32)
             else:
                 conf = None
-                
+
             if 'entr' in dsts:
                 entr = -np.sum(valid_probs * np.log(np.clip(valid_probs, 1e-6, 1.0)), axis=0).astype(np.float32)
             else:
                 entr = None
-                
+
             if 'gap' in dsts:
                 top2 = np.partition(valid_probs, -2, axis=0)[-2:]
                 gap = (top2[1] - top2[0]).astype(np.float32)
             else:
                 gap = None
-                
+
             if 'gradient' in dsts:
                 # For binary, save Class 1 probability
                 if n_classes == 2:
@@ -153,27 +153,27 @@ def writer_process(q: mp.Queue, out_paths: Dict[str, Path], profile_dict: Dict[s
                     gradient = None
             else:
                 gradient = None
-            
+
             # --- Write to Disk ---
             # If chunk start is negative (halo), the valid data (ZoR) starts at c_chunk_start + halo
             valid_c = c_chunk_start + halo
             valid_r = r_chunk_start + halo
-            
+
             w_width = min(zor, W_full - valid_c)
             w_height = min(zor, H_full - valid_r)
-            
+
             # Ensure window is not out of bounds (e.g. last partial chunk)
             if w_width <= 0 or w_height <= 0:
                 continue
-                
+
             window = Window(valid_c, valid_r, w_width, w_height)
-            
+
             if 'class' in dsts: dsts['class'].write(dom[:w_height, :w_width], window=window, indexes=1)
             if 'conf' in dsts: dsts['conf'].write(conf[:w_height, :w_width], window=window, indexes=1)
             if 'entr' in dsts and entr is not None: dsts['entr'].write(entr[:w_height, :w_width], window=window, indexes=1)
             if 'gap' in dsts and gap is not None: dsts['gap'].write(gap[:w_height, :w_width], window=window, indexes=1)
             if 'gradient' in dsts and gradient is not None: dsts['gradient'].write(gradient[:w_height, :w_width], window=window, indexes=1)
-            
+
             pbar.update(1)
 
     except Exception as e:
@@ -197,10 +197,10 @@ def main_hydra(cfg: DictConfig):
     tile_path = Path(cfg.input_path)
     output_path = Path(cfg.output_path) / tile_path.name
     output_path.mkdir(parents=True, exist_ok=True)
-    
+
     log.info(f"Processing tile: {tile_path}")
     log.info(f"Output directory: {output_path}")
-    
+
     # Get Tile Dimensions
     s2_pattern = cfg.data_source.get('s2_file_pattern', "S2*.SAFE/**/*{band_name}*.jp2")
     ref_path = _find_band_path(tile_path, 'B02', s2_pattern)
@@ -215,13 +215,13 @@ def main_hydra(cfg: DictConfig):
     # --- 1. Instantiate Adapter First (Dependency Injection) ---
     # This allows us to query the adapter for its requirements (bands, classes, patch_size)
     # BEFORE we calculate memory usage and tiling.
-    
+
     from importlib import import_module
-    
+
     if 'adapter' in cfg.model:
         log.info("Using adapter configuration from model config.")
         adapter_cfg = OmegaConf.to_container(cfg.model.adapter, resolve=True)
-        
+
         # Inject pipeline defaults if missing in adapter params
         if 'params' not in adapter_cfg:
             adapter_cfg['params'] = {}
@@ -231,12 +231,12 @@ def main_hydra(cfg: DictConfig):
             adapter_cfg['params']['s2_file_pattern'] = cfg.data_source.s2_file_pattern
         if 's1_file_pattern' in cfg.data_source:
             adapter_cfg['params']['s1_file_pattern'] = cfg.data_source.s1_file_pattern
-            
+
         # Use pipeline defaults if not set in adapter
         # Note: The adapter might have its own hard defaults if these are None
         if 'patch_size' not in adapter_cfg['params']:
              adapter_cfg['params']['patch_size'] = cfg.pipeline.tiling.get('patch_size', 120)
-             
+
         if 'stride' not in adapter_cfg['params']:
              adapter_cfg['params']['stride'] = cfg.pipeline.tiling.get('patch_stride', 60)
 
@@ -244,10 +244,10 @@ def main_hydra(cfg: DictConfig):
         # Legacy / Default behavior for BigEarthNet
         if means is None or stds is None:
             raise ValueError("Model config must contain 'means' and 'stds' for normalization if no explicit adapter is defined.")
-            
+
         log.info(f"Using fixed normalization MEANS: {means}")
         log.info(f"Using fixed normalization STDS: {stds}")
-        
+
         adapter_params = {
             'model_config': OmegaConf.to_container(cfg.model, resolve=True),
             'means': means,
@@ -259,9 +259,9 @@ def main_hydra(cfg: DictConfig):
             's2_file_pattern': cfg.data_source.get('s2_file_pattern'),
             's1_file_pattern': cfg.data_source.get('s1_file_pattern')
         }
-        
+
         adapter_cfg = {
-            'path': 'ben_v2.adapters.bigearthnet_adapter',
+            'path': 'eo_core.adapters.bigearthnet_adapter',
             'class': 'BigEarthNetAdapter',
             'params': adapter_params
         }
@@ -281,9 +281,9 @@ def main_hydra(cfg: DictConfig):
     stride = adapter.stride
     num_classes = adapter.num_classes
     num_bands = adapter.num_bands
-    
+
     stride_ratio = stride / patch_size if patch_size > 0 else 0.5
-    
+
     # Setup Inference Engine Config Dynamically
     zor_config = cfg.pipeline.tiling.zone_of_responsibility_size
     halo = cfg.pipeline.tiling.halo_size_pixels
@@ -299,11 +299,11 @@ def main_hydra(cfg: DictConfig):
 
     # Calculate ZoR using the model-specific parameters
     zor = resolve_zor(
-        zor_config, 
-        halo, 
-        patch_size=patch_size, 
-        num_bands=num_bands, 
-        num_classes=num_classes, 
+        zor_config,
+        halo,
+        patch_size=patch_size,
+        num_bands=num_bands,
+        num_classes=num_classes,
         stride_ratio=stride_ratio,
         prefetch_queue_size=pq_size,
         writer_queue_size=writer_q_size,
@@ -332,20 +332,20 @@ def main_hydra(cfg: DictConfig):
         count=1,
         compress='lzw',
         tiled=True,
-        blockxsize=256, 
+        blockxsize=256,
         blockysize=256
     )
-    
+
     # Prepare Paths for Writer
     out_paths = {
         'class': output_path / f"{tile_path.name}_class.tif",
         'conf': output_path / f"{tile_path.name}_maxprob.tif",
     }
-    
+
     # Gradient Preview: Saves Class 1 probability for binary models (visualizes detection confidence)
     if cfg.pipeline.output.get('save_gradient_preview', False) and num_classes == 2:
         out_paths['gradient'] = output_path / f"{tile_path.name}_gradient.tif"
-        
+
     if cfg.pipeline.output.save_entropy:
         out_paths['entr'] = output_path / f"{tile_path.name}_entropy.tif"
     if cfg.pipeline.output.save_gap:
@@ -361,8 +361,8 @@ def main_hydra(cfg: DictConfig):
     # --- Initialize Writer Process ---
     # Increase maxsize to decouple Inference (Fast) from Writing (Slow)
     writer_queue_size = cfg.pipeline.distributed.get('writer_queue_size', 4)
-    write_queue = ctx.Queue(maxsize=writer_queue_size) 
-    
+    write_queue = ctx.Queue(maxsize=writer_queue_size)
+
     writer_p = ctx.Process(
         target=writer_process,
         args=(write_queue, out_paths, profile, zor, halo, W_full, H_full, total_chunks, patch_size, engine.adapter),
@@ -371,7 +371,7 @@ def main_hydra(cfg: DictConfig):
     writer_p.start()
 
     log.info("Starting Inference Loop (InferenceEngine)")
-    
+
     # --- Initialize Input Stream ---
     def input_stream_generator():
         for r, c in coords_list:
@@ -379,7 +379,7 @@ def main_hydra(cfg: DictConfig):
             c_read = c - halo
             w_read = zor + (2 * halo)
             h_read = zor + (2 * halo)
-            
+
             raw_input = {
                 'tile_folder': tile_path,
                 'r_start': r_read,
@@ -388,7 +388,7 @@ def main_hydra(cfg: DictConfig):
                 'h_read': h_read,
                 'bands': bands
             }
-            
+
             # Run CPU-bound preprocessing
             t_preprocess_start = time.perf_counter()
             try:
@@ -403,7 +403,7 @@ def main_hydra(cfg: DictConfig):
         # Use a thread queue to buffer preprocessed inputs
         prefetch_queue_size = cfg.pipeline.distributed.get('prefetch_queue_size', 3)
         prefetch_queue = queue.Queue(maxsize=prefetch_queue_size)
-        
+
         def prefetch_worker():
             try:
                 for item in input_stream_generator():
@@ -416,7 +416,7 @@ def main_hydra(cfg: DictConfig):
         import threading
         loader_thread = threading.Thread(target=prefetch_worker, daemon=True)
         loader_thread.start()
-        
+
         def get_next_batch():
             return prefetch_queue.get()
     else:
@@ -432,7 +432,7 @@ def main_hydra(cfg: DictConfig):
                 return None
 
     inference_pbar = tqdm(total=total_chunks, desc="Inference", position=0, leave=True)
-    
+
     try:
         while True:
             # Check writer status
@@ -444,34 +444,34 @@ def main_hydra(cfg: DictConfig):
             model_input = get_next_batch()
             if model_input is None:
                 break # Done or Error # Done or Error
-            
+
             # 2. Predict (GPU) - RAW Output (logits, metadata)
             t_predict_raw_start = time.perf_counter()
             logits_t, metadata = engine.predict_raw(model_input)
             log.debug(f"[{time.perf_counter()-t_predict_raw_start:.4f}s] Main: engine.predict_raw")
-            
+
             # 3. Pass to Writer (CPU)
-            # We pass the raw logits and the metadata. 
+            # We pass the raw logits and the metadata.
             # Postprocessing happens in the writer process.
-            
+
             logits_t = logits_t.share_memory_()
-            
+
             # Put in queue (this might block if queue is full, indicating writer is slow)
             write_queue.put((logits_t, metadata))
-            
+
             inference_pbar.update(1)
 
     except KeyboardInterrupt:
         log.info("Interrupted by user.")
         write_queue.put(None)
         writer_p.terminate()
-        
+
     finally:
         inference_pbar.close()
         if writer_p.is_alive():
             write_queue.put(None)
             writer_p.join()
-        
+
         if writer_p.exitcode is not None and writer_p.exitcode != 0:
             log.error(f"Writer process exited with error code {writer_p.exitcode}. Output files may be incomplete.")
 
@@ -486,9 +486,9 @@ def main_hydra(cfg: DictConfig):
 
     class_map = {
         label: {
-            "index": i, 
+            "index": i,
             "color": color_map.get(label, [128,128,128]) if isinstance(color_map.get(label), list) else color_map.get(label, np.array([128,128,128])).tolist()
-        } 
+        }
         for i, label in enumerate(labels)
     }
     with open(output_path / f"{tile_path.name}_classmap.json", "w") as f:
@@ -502,9 +502,9 @@ def main_hydra(cfg: DictConfig):
             if class_path.exists():
                 with rasterio.open(class_path) as src:
                     generate_low_res_preview(
-                        src.read(1), 
-                        output_path / "preview.png", 
-                        save_preview=save_preview, 
+                        src.read(1),
+                        output_path / "preview.png",
+                        save_preview=save_preview,
                         downscale_factor=downscale,
                         labels=labels,
                         color_map=color_map

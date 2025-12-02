@@ -5,7 +5,7 @@ model:
   
   # Adapter configuration
   adapter:
-    path: "ben_v2.adapters.prithvi_adapter"
+    path: "eo_core.adapters.prithvi_adapter"
     class: "PrithviAdapter"
     params:
       model_name_or_path: "ibm-nasa-geospatial/Prithvi-EO-1.0-100M-sen1floods11"

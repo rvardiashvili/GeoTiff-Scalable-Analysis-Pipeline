@@ -25,7 +25,7 @@ def monitor_current_process(interval=0.1):
     process = psutil.Process()
     cpu_percents = []
     mem_rss = []
-    
+
     # Start monitoring
     cpu_percents.append(process.cpu_percent(interval=None)) # non-blocking first call
     mem_rss.append(process.memory_info().rss)
@@ -41,24 +41,24 @@ def benchmark(input_dir: str, output_dir: str):
     """
     input_path = Path(input_dir)
     output_path = Path(output_dir)
-    
+
     if not input_path.is_dir():
         print(f"❌ Error: Input directory '{input_dir}' not found.")
         return
 
     output_path.mkdir(exist_ok=True)
-    
+
     results = []
-    
+
     tile_folders = [d for d in input_path.iterdir() if d.is_dir()]
 
     print(f"--- Starting Benchmark ---")
     print(f"Found {len(tile_folders)} tiles to process.")
 
     # Initialize Hydra
-    # config_path is relative to this file: src/ben_v2/benchmark.py -> ../../configs
+    # config_path is relative to this file: src/eo_core/benchmark.py -> ../../configs
     rel_config_path = "../../configs"
-    
+
     # Clear any existing GlobalHydra instance to avoid conflicts
     try:
         hydra.core.global_hydra.GlobalHydra.instance().clear()
@@ -70,7 +70,7 @@ def benchmark(input_dir: str, output_dir: str):
         # We provide dummy paths just to satisfy the mandatory "???" fields in config.yaml
         print("Loading configuration and model...")
         cfg_template = hydra.compose(config_name="config", overrides=["input_path=/tmp", "output_path=/tmp"])
-        
+
         # Instantiate model once using Hydra
         model = hydra.utils.instantiate(cfg_template.model)
         model.to(get_device()).eval()
@@ -78,35 +78,35 @@ def benchmark(input_dir: str, output_dir: str):
 
         for i, tile_folder in enumerate(tile_folders):
             print(f"\n--- Processing tile {i+1}/{len(tile_folders)}: {tile_folder.name} ---")
-            
+
             tile_output_path = output_path # main_hydra handles creating the subdir
-            
+
             # Monitor resource usage before processing
             process_start_metrics = monitor_current_process()
 
             start_time = time.time()
-            
+
             # Create specific config for this tile
             # We copy the template and update the paths
             cfg = cfg_template.copy()
             cfg.input_path = str(tile_folder)
             cfg.output_path = str(output_path)
-            
+
             # Run the pipeline with the pre-loaded model
             main_hydra(cfg, model=model)
-            
+
             end_time = time.time()
-            
+
             # Monitor resource usage after processing
             process_end_metrics = monitor_current_process()
 
             duration = end_time - start_time
-            
+
             input_size_mb = get_folder_size(tile_folder)
             tile_out_dir = output_path / tile_folder.name
             output_size_mb = get_folder_size(tile_out_dir) if tile_out_dir.exists() else 0
             file_count = len(list(tile_folder.glob('**/*')))
-            
+
             result = {
                 "tile_name": tile_folder.name,
                 "processing_time_seconds": duration,
@@ -119,14 +119,14 @@ def benchmark(input_dir: str, output_dir: str):
                 "memory_mb_at_end": process_end_metrics["initial_memory_mb"],
             }
             results.append(result)
-            
+
             print(f"--- Finished in {duration:.2f} seconds ---")
 
     # Generate report
     report_path = output_path / "benchmark_report.csv"
     df = pd.DataFrame(results)
     df.to_csv(report_path, index=False)
-    
+
     print(f"\n--- Benchmark Complete ---")
     print(f"Report saved to {report_path}")
 

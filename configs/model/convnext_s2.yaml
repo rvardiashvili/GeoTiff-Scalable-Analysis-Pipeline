@@ -3,7 +3,7 @@ model:
   
   # Adapter configuration
   adapter:
-    path: "ben_v2.adapters.bigearthnet_adapter"
+    path: "eo_core.adapters.bigearthnet_adapter"
     class: "BigEarthNetAdapter"
     params:
       model_config:
