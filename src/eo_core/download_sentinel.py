@@ -159,6 +159,7 @@ def main():
     parser.add_argument("--output_dir", type=str, default=DEFAULT_OUTPUT_DIR, help="Base Output Directory for all downloads.")
     parser.add_argument("--username", type=str, default=DEFAULT_USERNAME, help="CDSE Username")
     parser.add_argument("--password", type=str, default=DEFAULT_PASSWORD, help="CDSE Password")
+    parser.add_argument("--time_window", type=int, default=DEFAULT_TIME_WINDOW_DAYS, help="Time window in days for finding matching Sentinel-1 products.")
     
     # New arguments for specific product downloads
     parser.add_argument("--s1_product_name", type=str, help="Full name of a specific Sentinel-1 product to download.")
@@ -209,8 +210,8 @@ def main():
 
                 print(f"\nFound Sentinel-2 product: {s2_name} from {s2_date} (Cloud: {s2_cloud}%)")
 
-                s1_start_date = (s2_date - timedelta(days=DEFAULT_TIME_WINDOW_DAYS)).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
-                s1_end_date = (s2_date + timedelta(days=DEFAULT_TIME_WINDOW_DAYS)).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+                s1_start_date = (s2_date - timedelta(days=args.time_window)).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+                s1_end_date = (s2_date + timedelta(days=args.time_window)).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
                 
                 s1_filter = "Attributes/OData.CSC.StringAttribute/any(a:a/Name eq 'productType' and a/Value eq 'GRD')"
                 

@@ -141,7 +141,7 @@ def resolve_zor(zor_config: Union[int, str], halo: int, patch_size: int = 120, *
             print(f"⚠️ Invalid ZoR config, defaulting to {patch_size * 10}")
             return patch_size * 10
 
-def estimate_optimal_batch_size(model: torch.nn.Module, input_shape: Tuple[int, ...], device: torch.device, safety_factor: float = 0.85) -> int:
+def estimate_optimal_batch_size(model: torch.nn.Module, input_shape: Tuple[int, ...], device: torch.device, safety_factor: float = 0.80) -> int:
     """
     Estimates the optimal batch size for the given model and input shape by binary search
     or heuristic to fill GPU memory.
@@ -158,65 +158,59 @@ def estimate_optimal_batch_size(model: torch.nn.Module, input_shape: Tuple[int, 
     if device.type == 'cpu':
         return 16 # Conservative default for CPU
         
+    log.info("🧠 Starting Binary Search for Optimal Batch Size...")
+    
+    # Binary Search Parameters
+    low = 1
+    high = 512 # Hard cap
+    optimal_bs = 1
+    
+    # Move model to device
+    model.to(device)
+    model.eval() # Ensure eval mode
+    
+    # Get initial state
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+    
     try:
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
-        
-        total_mem = torch.cuda.get_device_properties(device).total_memory
-        # Get currently allocated to subtract
-        allocated = torch.cuda.memory_allocated(device)
-        reserved = torch.cuda.memory_reserved(device)
-        free_mem = total_mem - allocated # We use allocated because reserved can be reused
-        
-        target_mem = free_mem * safety_factor
-        
-        # Move model to device if not already (though it should be)
-        model.to(device)
-        
-        # 1. Measure memory for Batch=1
-        # Ensure correct dtype (Float32 is standard)
-        dummy_input_1 = torch.zeros((1, *input_shape), device=device, dtype=torch.float32)
-        
-        torch.cuda.reset_peak_memory_stats(device)
-        with torch.no_grad():
-            _ = model(dummy_input_1)
-        max_mem_1 = torch.cuda.max_memory_allocated(device)
-        
-        # 2. Measure memory for Batch=4 (to get a better slope)
-        # If we can't even fit 4, we fallback to 1.
-        try:
-            dummy_input_4 = torch.zeros((4, *input_shape), device=device, dtype=torch.float32)
-            torch.cuda.reset_peak_memory_stats(device)
-            with torch.no_grad():
-                _ = model(dummy_input_4)
-            max_mem_4 = torch.cuda.max_memory_allocated(device)
+        while low <= high:
+            mid = (low + high) // 2
             
-            # Marginal cost per sample = (Mem4 - Mem1) / (4 - 1)
-            # This removes fixed overheads (weights, kernels context)
-            mem_per_sample = (max_mem_4 - max_mem_1) / 3.0
-            
-            # Base overhead
-            fixed_overhead = max_mem_1 - mem_per_sample
-            
-        except RuntimeError:
-            # OOM at batch 4? Fallback to simple estimation
-            mem_per_sample = max_mem_1 - allocated
-            fixed_overhead = allocated
-
-        if mem_per_sample <= 0:
-            mem_per_sample = 10 * 1024 * 1024 # Fallback 10MB
-            
-        # Estimate max batch: (Target - Fixed) / Marginal
-        estimated_bs = int((target_mem - (fixed_overhead - allocated)) / mem_per_sample)
+            try:
+                # Create dummy input
+                dummy_input = torch.zeros((mid, *input_shape), device=device, dtype=torch.float32)
+                
+                # Clean previous run
+                torch.cuda.empty_cache()
+                
+                # Dry Run
+                with torch.no_grad():
+                     _ = model(dummy_input)
+                
+                # If we are here, it worked
+                optimal_bs = mid
+                low = mid + 1
+                # log.debug(f"Batch {mid}: OK")
+                
+            except RuntimeError as e:
+                if "out of memory" in str(e):
+                    # log.debug(f"Batch {mid}: OOM")
+                    high = mid - 1
+                else:
+                    # Some other error? Re-raise
+                    raise e
+                    
+        # Apply Safety Factor
+        # We found the absolute maximum 'mid' that didn't crash.
+        # Now we back off slightly to account for fragmentation during long runs.
+        final_bs = int(optimal_bs * safety_factor)
+        final_bs = max(1, final_bs)
         
-        # Sanity checks
-        estimated_bs = max(1, estimated_bs)
-        estimated_bs = min(estimated_bs, 4096) 
+        log.info(f"🧠 Binary Search Result: MaxBS={optimal_bs} -> SafeBS={final_bs} (Safety={safety_factor})")
         
-        log.info(f"🧠 Auto-Batch Estimation: Free={free_mem/1e9:.2f}GB, MarginalMem={mem_per_sample/1e6:.2f}MB/sample -> BatchSize={estimated_bs}")
-        
-        return estimated_bs
+        return final_bs
         
     except Exception as e:
-        log.warning(f"⚠️ Auto-batch estimation failed ({e}). Defaulting to 1.")
+        log.warning(f"⚠️ Binary search failed ({e}). Defaulting to 1.")
         return 1
