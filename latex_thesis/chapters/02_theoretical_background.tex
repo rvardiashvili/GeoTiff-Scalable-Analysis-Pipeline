@@ -3,12 +3,12 @@
 
 \section{Earth Observation Data Structures}
 
-To understand the engineering challenges of EO inference, one must first define the data model. In the context of High-Performance Computing and Array Databases, Earth Observation data is best represented as a \textbf{Datacube}.
+To understand the engineering challenges of \EO inference, one must first define the data model. In the context of High-Performance Computing and Array Databases, Earth Observation data is best represented as a \textbf{Datacube}.
 
 \subsection{The Multi-Dimensional Array}
 Formally, a Datacube $D$ is a dense, multi-dimensional array defined as:
 \[
-D \in \mathbb{R}^{X \times Y \times T \times B}
+    D \in \mathbb{R}^{X \times Y \times T \times B}
 \]
 where:
 \begin{itemize}
@@ -17,10 +17,10 @@ where:
     \item $B$ represents the spectral bands (e.g., Blue, Green, Red, NIR, SWIR).
 \end{itemize}
 
-Unlike standard RGB images used in Computer Vision ($X \times Y \times 3$), EO data is inherently geospatial. Every pixel $(i, j)$ corresponds to a coordinate on the Earth's surface via an Affine Transform matrix and a Coordinate Reference System (CRS).
+Unlike standard RGB images used in Computer Vision ($X \times Y \times 3$), \EO data is inherently geospatial. Every pixel $(i, j)$ corresponds to a coordinate on the Earth's surface via an Affine Transform matrix and a Coordinate Reference System (CRS).
 
 \subsection{The Alignment Problem in Multi-Modal Fusion}
-A critical challenge in modern EO is \textbf{Multi-Modal Fusion}---combining Optical (e.g., Sentinel-2) and Radar (e.g., Sentinel-1) data. These sensors have fundamentally different acquisition geometries.
+A critical challenge in modern \EO is \textbf{Multi-Modal Fusion}---combining Optical (e.g., Sentinel-2) and Radar (e.g., Sentinel-1) data. These sensors have fundamentally different acquisition geometries.
 \begin{itemize}
     \item \textbf{Sentinel-2} is an optical push-broom sensor, typically delivered in the UTM (Universal Transverse Mercator) projection, divided into $100km \times 100km$ tiles (MGRS grid).
     \item \textbf{Sentinel-1} is a Synthetic Aperture Radar (SAR) side-looking sensor. Its Level-1 GRD (Ground Range Detected) products are often delivered in a WGS84 CRS or a satellite-specific geometry, with pixels that do not align one-to-one with the Sentinel-2 grid.
@@ -32,29 +32,29 @@ Naive stacking of these arrays as simple NumPy tensors is geometrically invalid.
 
 The state-of-the-art for extracting semantic information from these datacubes lies in Deep Learning.
 
-\subsection{CNNs and Effective Receptive Field (ERF)}
-Convolutional Neural Networks (CNNs) like U-Net or ResNet build a representation of the input through successive layers of convolution and pooling. A fundamental concept is the \textbf{Receptive Field}---the region of input pixels that theoretically contributes to a specific output pixel.
-While the \textit{theoretical} receptive field of a deep network might cover the entire input image, empirical studies (Luo et al., 2016) show that the \textbf{Effective Receptive Field (ERF)} follows a Gaussian distribution centered on the output pixel. The gradient magnitude decays rapidly from the center to the periphery.
+\subsection{\CNNs{} and Effective Receptive Field (ERF)}
+Convolutional Neural Networks (\CNNs) like U-Net or ResNet build a representation of the input through successive layers of convolution and pooling. A fundamental concept is the \textbf{Receptive Field}---the region of input pixels that theoretically contributes to a specific output pixel.
+While the \textit{theoretical} receptive field of a deep network might cover the entire input image, empirical studies \cite{luo2016erf} show that the \textbf{Effective Receptive Field (ERF)} follows a Gaussian distribution centered on the output pixel. The gradient magnitude decays rapidly from the center to the periphery.
 
 \textbf{Implication for Tiling:} This Gaussian distribution means that predictions made at the spatial edges of an input patch are inherently less reliable than those at the center. At the edge, the kernel "sees" the zero-padding (artificial data) rather than the true neighboring pixels. This is the theoretical root cause of grid artifacts.
 
 \subsection{Foundation Models: The Case of Prithvi}
-Recently, the field has moved towards \textbf{Foundation Models}. The \textbf{Prithvi-100M} model, developed by IBM and NASA, represents this shift. It is a Vision Transformer (ViT) based on the Masked Autoencoder (MAE) architecture, pre-trained on the Harmonized Landsat Sentinel-2 (HLS) dataset.
+Recently, the field has moved towards \textbf{Foundation Models}. The \textbf{Prithvi-100M} model \cite{jakubik2023prithvi}, developed by IBM and NASA, represents this shift. It is a Vision Transformer (\ViT) based on the Masked Autoencoder (MAE) architecture, pre-trained on the Harmonized Landsat Sentinel-2 (HLS) dataset.
 \begin{itemize}
-    \item \textbf{Architecture:} Unlike CNNs which are translation-invariant, ViTs split the image into rigid patches (e.g., $16 \times 16$ pixels) and process them as a sequence of tokens.
+    \item \textbf{Architecture:} Unlike \CNNs{} which are translation-invariant, \ViTs{} split the image into rigid patches (e.g., $16 \times 16$ pixels) and process them as a sequence of tokens.
     \item \textbf{Inference Challenge:} Prithvi typically expects a fixed input size (e.g., $224 \times 224 \times 6$). Running this model on a $10,000 \times 10,000$ pixel image requires not just tiling, but careful management of the positional embeddings to ensure the model understands the spatial context.
 \end{itemize}
 
-\subsection{State of the Art: Vision Transformers in EO}
-The dominance of CNNs is currently being challenged by \textbf{Vision Transformers (ViTs)}. Originally designed for Natural Language Processing (NLP), Transformers leverage the \textbf{Self-Attention Mechanism} to model long-range dependencies, which is particularly beneficial in Remote Sensing where context (e.g., a river flowing from top-left to bottom-right) spans the entire image.
+\subsection{State of the Art: Vision Transformers in \EO}
+The dominance of \CNNs{} is currently being challenged by \textbf{Vision Transformers (\ViTs)}. Originally designed for Natural Language Processing (NLP), Transformers leverage the \textbf{Self-Attention Mechanism} to model long-range dependencies, which is particularly beneficial in Remote Sensing where context (e.g., a river flowing from top-left to bottom-right) spans the entire image.
 
 \begin{itemize}
-    \item \textbf{Swin Transformer (Liu et al., 2021):} Introduced a hierarchical transformer whose representation is computed with shifted windows. This architecture is efficient for dense prediction tasks like segmentation and has become a standard backbone in EO competitions.
-    \item \textbf{SatMAE (Cong et al., 2022):} Applied Masked Autoencoders (MAE) to satellite imagery. By masking 75% of the input patches and forcing the model to reconstruct them, SatMAE learns robust spectral-spatial representations without needing millions of labeled labels.
-    \item \textbf{Prithvi (Jakubik et al., 2023):} Built upon the MAE foundation, Prithvi is specialized for HLS (Harmonized Landsat Sentinel) data, incorporating temporal attention to handle time-series.
+    \item \textbf{Swin Transformer \cite{liu2021swin}:} Introduced a hierarchical transformer whose representation is computed with shifted windows. This architecture is efficient for dense prediction tasks like segmentation and has become a standard backbone in \EO competitions.
+    \item \textbf{SatMAE \cite{cong2022satmae}:} Applied Masked Autoencoders (MAE) to satellite imagery. By masking 75\% of the input patches and forcing the model to reconstruct them, SatMAE learns robust spectral-spatial representations without needing millions of labeled labels.
+    \item \textbf{Prithvi \cite{jakubik2023prithvi}:} Built upon the MAE foundation, Prithvi is specialized for HLS (Harmonized Landsat Sentinel) data, incorporating temporal attention to handle time-series.
 \end{itemize}
 
-This shift towards ViTs exacerbates the tiling problem. While CNNs have a "fading" receptive field, ViTs have a global receptive field (within the patch sequence). Cutting a ViT's input field arbitrarily at a tile boundary disrupts the positional embeddings, making the need for overlap and smooth reconstruction even more critical.
+This shift towards \ViTs{} exacerbates the tiling problem. While \CNNs{} have a "fading" receptive field, \ViTs{} have a global receptive field (within the patch sequence). Cutting a \ViT{}'s input field arbitrarily at a tile boundary disrupts the positional embeddings, making the need for overlap and smooth reconstruction even more critical.
 
 \section{Related Work and State of the Art}
 
@@ -64,26 +64,26 @@ The problem of tiling artifacts is well-known, and several solutions exist, thou
 The simplest approach is non-overlapping sliding windows. This is the default behavior of many academic scripts.
 \begin{itemize}
     \item \textbf{Method:} Split image into $N$ blocks. Infer $N$ blocks. Stitch $N$ blocks.
-    \item \textbf{Drawback:} Guaranteed discontinuities at boundaries. $C^0$ continuity is not preserved.
+    \item \textbf{Drawback:} Ensured discontinuities at boundaries. $C^0$ continuity is not preserved.
 \end{itemize}
 
 \subsection{TorchGeo and GridGeoSampler}
-\textbf{TorchGeo} is a PyTorch domain library that provides specific data loaders for geospatial data.
+\textbf{TorchGeo} \cite{stewart2022torchgeo} is a PyTorch domain library that provides specific data loaders for geospatial data.
 \begin{itemize}
     \item \textbf{Approach:} It offers a `GridGeoSampler` and `RandomGeoSampler` which can perform sliding window inference.
     \item \textbf{Limitation:} While excellent for research and training, TorchGeo focuses on the \textit{Data Loading} step. It does not strictly enforce a memory management model for the \textit{Inference} step (e.g., handling the VRAM accumulation of logits). It leaves the "stitching" logic largely to the user or simple averaging methods.
 \end{itemize}
 
 \subsection{Solaris (CosmiQ Works)}
-\textbf{Solaris} was an early attempt to build a pipeline for vector-to-raster operations.
+\textbf{Solaris} \cite{maire2016solaris} was an early attempt to build a pipeline for vector-to-raster operations.
 \begin{itemize}
     \item \textbf{Approach:} It included tools for tiling and stitching.
     \item \textbf{Status:} It is largely unmaintained. Its tiling logic was often disk-based (writing thousands of small TIFs), which creates a massive I/O bottleneck compared to in-memory tensor slicing.
 \end{itemize}
 
 \subsection{Array Databases (Rasdaman, SciDB)}
-In the database world, systems like \textbf{Rasdaman} handle "tiling" natively at the storage level.
+In the database world, systems like \textbf{Rasdaman} \cite{baumann2019wcps} handle "tiling" natively at the storage level.
 \begin{itemize}
-    \item \textbf{Approach:} Data is stored in pre-defined tiles (BLOBs) in the database. Queries are executed via OGC WCPS (Web Coverage Processing Service).
-    \item \textbf{The Gap:} Traditionally, these databases excelled at arithmetic operations (e.g., `NDVI = (NIR-Red)/(NIR+Red)`) but struggled with Deep Learning inference which requires loading complex Python libraries (PyTorch/TensorFlow) and massive model weights into the database kernel. GSIP aims to bridge this gap by acting as a potential external execution engine.
+    \item \textbf{Approach:} Data is stored in pre-defined tiles (BLOBs) in the database. Queries are executed via OGC \texttt{WCPS} (Web Coverage Processing Service).
+    \item \textbf{The Gap:} Traditionally, these databases excelled at arithmetic operations (e.g., \texttt{NDVI = (NIR-Red)/(NIR+Red)}) but struggled with Deep Learning inference which requires loading complex Python libraries (PyTorch/TensorFlow) and massive model weights into the database kernel. \GSIP{} aims to bridge this gap by acting as a potential external execution engine.
 \end{itemize}

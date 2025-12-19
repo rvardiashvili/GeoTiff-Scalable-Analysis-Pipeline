@@ -1,12 +1,12 @@
-\chapter{Methodology: The GeoSpatial Inference Pipeline (GSIP)}
+\chapter{Methodology: The GeoSpatial Inference Pipeline (\GSIP{})}
 \label{ch:methodology}
 
 \section{System Design Philosophy}
 
-The GeoSpatial Inference Pipeline (GSIP) is designed as a high-throughput, fault-tolerant system for operating on raster data that exceeds system memory. It adheres to the \textbf{Principle of Separation of Concerns}: the \textit{Physical Tiling} (how data is moved from disk to RAM) is decoupled from the \textit{Logical Inference} (what the neural network actually does).
+The GeoSpatial Inference Pipeline (\GSIP{}) is designed as a high-throughput, fault-tolerant system for operating on raster data that exceeds system memory. It adheres to the \textbf{Principle of Separation of Concerns}: the \textit{Physical Tiling} (how data is moved from disk to RAM) is decoupled from the \textit{Logical Inference} (what the neural network actually does).
 
 \subsection{The Adapter Pattern}
-To ensure the system remains model-agnostic, GSIP employs the \textbf{Adapter Design Pattern}. The core engine does not import `torchvision.models.resnet` or `transformers.Prithvi`. Instead, it interacts with a `BaseAdapter` abstract interface.
+To ensure the system remains model-agnostic, \GSIP{} employs the \textbf{Adapter Design Pattern}. The core engine does not import `torchvision.models.resnet` or `transformers.Prithvi`. Instead, it interacts with a `BaseAdapter` abstract interface.
 
 \begin{lstlisting}[language=Python, caption=The BaseAdapter Interface]
 class BaseAdapter(ABC):
@@ -31,7 +31,7 @@ This polymorphism allows the pipeline to act as a universal "driver." Whether th
 \subsection{The Reporter Pattern}
 While the Adapter Pattern abstracts the \textit{input} and \textit{model execution}, the \textbf{Reporter Pattern} abstracts the \textit{output generation}. In scientific workflows, the desired artifact varies widely: one user might need a pixel-perfect segmentation map (GeoTIFF), another a quick visual preview (PNG), and a third a statistical summary of class distributions (JSON).
 
-To avoid polluting the core inference loop with format-specific I/O logic, GSIP delegates result handling to `BaseReporter` implementations.
+To avoid polluting the core inference loop with format-specific I/O logic, \GSIP{} delegates result handling to `BaseReporter` implementations.
 
 \begin{lstlisting}[language=Python, caption=The BaseReporter Interface]
 class BaseReporter(ABC):
@@ -45,9 +45,9 @@ This architecture allows for "plug-and-play" output modules. For example, the `G
 
 \section{The Memory Model: Zone of Responsibility}
 
-A critical innovation of GSIP is the \textbf{Zone of Responsibility (ZoR)} algorithm. In standard deep learning scripts, the "batch size" and "tile size" are often hardcoded hyperparameters. This works for homogenous cluster environments but fails in heterogeneous deployment (e.g., moving from a DGX station to a laptop).
+A critical innovation of \GSIP{} is the \textbf{Zone of Responsibility (ZoR)} algorithm. In standard deep learning scripts, the "batch size" and "tile size" are often hardcoded hyperparameters. This works for homogenous cluster environments but fails in heterogeneous deployment (e.g., moving from a DGX station to a laptop).
 
-GSIP inverts this dependency. It views the \textit{Available RAM} as the independent variable and the \textit{Tile Size} as the dependent variable.
+\GSIP{} inverts this dependency. It views the \textit{Available RAM} as the independent variable and the \textit{Tile Size} as the dependent variable.
 
 \subsection{The Cost Function}
 We define the memory cost function for processing a single spatial chunk of dimensions $L \times L$ as:
@@ -67,35 +67,35 @@ For a segmentation task with $C_{out}=19$ classes (BigEarthNet), the output tens
 The algorithm solves for the maximum $L$ such that $M_{total}(L) < \alpha \cdot \text{RAM}_{available}$, where $\alpha \approx 0.8$ is a safety factor.
 
 \subsection{Dynamic Resolution}
-At runtime, the \texttt{calculate\_optimal\_zor()} function probes the OS (via \texttt{psutil}) to determine free memory. It iteratively tests increasing values of $L$ (e.g., 1024, 2048, 4096) until the cost function approaches the safety limit. This ensures that the system maximally utilizes available resources without triggering the OS Out-Of-Memory (OOM) killer.
+At runtime, the `\texttt{calculate_optimal_zor()}` function probes the OS (via `\texttt{psutil}`) to determine free memory. It iteratively tests increasing values of $L$ (e.g., 1024, 2048, 4096) until the cost function approaches the safety limit. This ensures that the system maximally utilizes available resources without triggering the OS Out-Of-Memory (OOM) killer.
 
 \section{Producer-Consumer Architecture}
 
 Deep Learning inference on satellite imagery is a \textbf{Bound-Varying Problem}:
 \begin{enumerate}
     \item \textbf{I/O Bound:} Reading compressed GeoTIFFs from disk.
-    \item \textbf{Compute Bound:} Running the ResNet/ViT forward pass on GPU.
+    \item \textbf{Compute Bound:} Running the ResNet/\ViT{} forward pass on GPU.
     \item \textbf{Memory Bound:} Merging the massive output probability maps.
 \end{enumerate}
 
-A sequential loop (\texttt{Read -> Infer -> Write}) would leave the GPU idle during Read/Write phases. GSIP utilizes a \textbf{Producer-Consumer} parallel architecture implemented via `torch.multiprocessing`.
+A sequential loop (`\texttt{Read -> Infer -> Write}`) would leave the GPU idle during Read/Write phases. \GSIP{} utilizes a \textbf{Producer-Consumer} parallel architecture implemented via `torch.multiprocessing`.
 
 \subsection{The Pipeline Flow}
 \begin{enumerate}
     \item \textbf{Main Process (The Producer):}
     \begin{itemize}
         \item \textbf{Action:} Slices the large input image into the calculated "Chunks" (ZoR).
-        \item \textbf{Action:} Performs "Lazy Reprojection" of Sentinel-1 data (using `rasterio.vrt`).
-        \item \textbf{Action:} Pushes normalized tensors into the `Inference Queue`.
-        \item \textit{Optimization:} Uses a background `Prefetcher` thread to ensure the Queue is never empty.
+        \item \textbf{Action:} Performs "Lazy Reprojection" of Sentinel-1 data (using `\texttt{rasterio.vrt}`).
+        \item \textbf{Action:} Pushes normalized tensors into the `\texttt{Inference Queue}`.
+        \item \textit{Optimization:} Uses a background `\texttt{Prefetcher}` thread to ensure the Queue is never empty.
     \end{itemize}
 
     \item \textbf{Inference Engine (GPU Worker):}
     \begin{itemize}
         \item \textbf{Action:} Pulls batches from the queue.
         \item \textbf{Action:} Moves data to CUDA device (asynchronously).
-        \item \textbf{Action:} Executes \texttt{model(x)} in \texttt{torch.no\_grad()} mode.
-        \item \textbf{Action:} Pushes raw logits (on CPU) to the `Writer Queue`.
+        \item \textbf{Action:} Executes `\texttt{model(x)}` in `\texttt{torch.no_grad()}` mode.
+        \item \textbf{Action:} Pushes raw logits (on CPU) to the `\texttt{Writer Queue}`.
     \end{itemize}
 
     \item \textbf{Writer Process (The Consumer):}
@@ -111,8 +111,23 @@ This architecture creates a "Pipelined" effect where the GPU is consistently sat
 
 \section{Multi-Modal Fusion Strategy}
 
-The pipeline natively handles sensor fusion. The configuration allows specifying multiple data sources.
+The pipeline natively handles sensor fusion, specifically the alignment of Sentinel-1 (Radar) and Sentinel-2 (Optical) data. This is achieved through a rigorous geometric workflow:
+
 \begin{itemize}
-    \item \textbf{Logical Alignment:} The system treats the Sentinel-2 grid as the "Anchor."
-    \item \textbf{Virtual Warping:} Sentinel-1 data is not physically reprojected on disk (which would double storage requirements). Instead, GSIP constructs a `WarperVRT` in memory. When a chunk is requested, GDAL computes the spline interpolation on-the-fly to align the SAR pixels with the Optical pixels. This "Virtual Data Cube" approach is essential for handling petabyte-scale archives where data duplication is prohibited.
+    \item \textbf{Logical Alignment:} The system treats the Sentinel-2 grid as the "Anchor" reference system. All other modalities are warped to match this grid's resolution and coordinate system.
+    \item \textbf{On-the-Fly Reprojection:} Sentinel-1 data, which typically arrives in a different projection (Ground Range Detected geometry), is not physically reprojected on disk to avoid data duplication. Instead, \GSIP{} performs \textbf{Lazy Reprojection} at the chunk level. When a specific spatial window is requested, the system uses the Ground Control Points (GCPs) from the Sentinel-1 manifest to compute the transformation and resample the pixels in memory using cubic or bilinear interpolation. This aims to ensure sub-pixel alignment accuracy without the storage cost of generating intermediate files.
 \end{itemize}
+
+\textit{Note:} While the codebase includes an experimental module for `DeepLearningRegistrationPipeline` (using Spatial Transformer Networks), the operational pipeline relies on the robust GCP-based geometric approach described above to aim to ensure geodetic validity.
+
+\section{Sentinel-2 Resolution Unification}
+
+A unique characteristic of the Sentinel-2 constellation is its multi-resolution acquisition: visible bands (B02, B03, B04) and NIR (B08) are at 10m/pixel, while vegetation red-edge (B05, B06, B07) and SWIR (B11, B12) are at 20m/pixel.
+
+\GSIP{} standardizes this heterogeneous grid during the ingestion phase:
+\begin{itemize}
+    \item \textbf{Reference Grid:} The pipeline automatically selects the 10m Blue band (B02) as the spatial anchor. Its dimensions ($10,980 \times 10,980$) define the shape of the output tensor.
+    \item \textbf{Nearest-Neighbor Upsampling:} All 20m and 60m bands are upsampled to match the 10m reference. We primarily employ \textbf{Nearest Neighbor} interpolation rather than Bilinear or Bicubic. This choice is deliberate to preserve the original radiometric values (Digital Numbers) without introducing synthetic "smoothing" artifacts, which could distort the spectral signature learned by the model.
+\end{itemize}
+
+Consequently, all output probability maps and segmentation masks produced by the pipeline are standardized to the native 10m resolution, maximizing the spatial detail available for downstream analysis.

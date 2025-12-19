@@ -1,7 +1,8 @@
 # @package _global_
 model:
   name: "Prithvi-100M-Crop-Classification"
-  
+  use_prefetcher: true
+
   adapter:
     path: "eo_core.adapters.prithvi_adapter"
     class: "PrithviAdapter"
@@ -37,17 +38,47 @@ model:
         img_size: 224
         # Multi-temporal usually means T=3
         patch_size: [1, 16, 16]
-        num_frames: 1 # We force 1 frame inference for now
+        num_frames: 3 # We force 3 frame inference (replicated)
         in_chans: 6   # We try to use 6 channels
         embed_dim: 768
-        depth: 12
+        depth: 6      # CORRECTED: Checkpoint has only 6 blocks
         num_heads: 12
         mlp_ratio: 4.0
         
       head_params:
         in_channels: 768
         channels: 256
-        num_classes: 13 # 13 Crop Classes
+        num_classes: 13 # Match Checkpoint (13 classes)
+
+      labels:
+        - "Natural Vegetation"
+        - "Forest"
+        - "Corn"
+        - "Soybeans"
+        - "Wetlands"
+        - "Developed/Barren"
+        - "Open Water"
+        - "Winter Wheat"
+        - "Alfalfa"
+        - "Fallow/Idle Cropland"
+        - "Cotton"
+        - "Sorghum"
+        - "Other"
+
+      color_map:
+        "Natural Vegetation": [0, 100, 0]
+        "Forest": [34, 139, 34]
+        "Corn": [255, 255, 0]
+        "Soybeans": [128, 128, 0]
+        "Wetlands": [0, 255, 255]
+        "Developed/Barren": [128, 128, 128]
+        "Open Water": [0, 0, 255]
+        "Winter Wheat": [255, 215, 0]
+        "Alfalfa": [144, 238, 144]
+        "Fallow/Idle Cropland": [165, 42, 42]
+        "Cotton": [255, 192, 203]
+        "Sorghum": [139, 69, 19]
+        "Other": [255, 0, 0]
 
 pipeline:
   output:

@@ -1,6 +1,6 @@
 # @package _global_
 model:
-  
+  use_prefetcher: true
   # Adapter configuration
   adapter:
     path: "eo_core.adapters.bigearthnet_adapter"

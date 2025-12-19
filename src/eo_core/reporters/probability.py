@@ -58,8 +58,10 @@ class ProbabilityReporter(BaseReporter):
         window = data['window']
         
         # valid_probs is (C, H, W), rasterio expects (C, H, W) for multi-band write
+        # Crop valid_probs to match the window dimensions
+        cropped_valid_probs = valid_probs[:, :window.height, :window.width]
         try:
-            self.dst.write(valid_probs, window=window)
+            self.dst.write(cropped_valid_probs, window=window)
         except Exception as e:
             log.error(f"ProbabilityReporter write error: {e}")
 

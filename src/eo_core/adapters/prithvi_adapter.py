@@ -72,19 +72,32 @@ class Attention(nn.Module):
         x = self.proj_drop(x)
         return x
 
+class Mlp(nn.Module):
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.act = act_layer()
+        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.drop = nn.Dropout(drop)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop(x)
+        x = self.fc2(x)
+        x = self.drop(x)
+        return x
+
 class Block(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0., norm_layer=nn.LayerNorm):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = Attention(dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
         self.norm2 = norm_layer(dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, int(dim * mlp_ratio)),
-            nn.GELU(),
-            nn.Dropout(drop),
-            nn.Linear(int(dim * mlp_ratio), dim),
-            nn.Dropout(drop)
-        )
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=nn.GELU, drop=drop)
 
     def forward(self, x):
         x = x + self.attn(self.norm1(x))
@@ -146,8 +159,44 @@ class PrithviViT(nn.Module):
     def prepare_features_for_image_model(self, x):
         x = x[:, 1:, :] # Remove CLS
         B, N, C = x.shape
-        H = W = int(N**0.5)
-        x = x.permute(0, 2, 1).reshape(B, C, H, W)
+        
+        # Calculate spatial dimensions based on config
+        # We assume square image and patches for now
+        if isinstance(self.patch_embed.patch_size, (tuple, list)):
+             p_h, p_w = self.patch_embed.patch_size[-2:]
+        else:
+             p_h = p_w = self.patch_embed.patch_size
+             
+        if isinstance(self.patch_embed.img_size, (tuple, list)):
+             img_h, img_w = self.patch_embed.img_size
+        else:
+             img_h = img_w = self.patch_embed.img_size
+             
+        H_grid = img_h // p_h
+        W_grid = img_w // p_w
+        num_spatial_tokens = H_grid * W_grid
+        
+        # Check if we have temporal dimension
+        if N > num_spatial_tokens:
+            # Assume N = T * num_spatial_tokens
+            T = N // num_spatial_tokens
+            if N % num_spatial_tokens != 0:
+                 # Fallback if shapes don't align perfectly (e.g. padding?)
+                 # Use old method or error
+                 log.warning(f"Token count {N} is not divisible by spatial grid {H_grid}x{W_grid}={num_spatial_tokens}. Resizing best effort.")
+                 H = W = int(N**0.5)
+                 x = x.permute(0, 2, 1).reshape(B, C, H, W)
+                 return x
+            
+            # Reshape to (B, T, H*W, C)
+            x = x.reshape(B, T, num_spatial_tokens, C)
+            
+            # Fuse Temporal Dimension: Average Pooling
+            # Since inputs are replicated, Mean is safe.
+            x = x.mean(dim=1) # (B, H*W, C)
+            
+        # Reshape to Image (B, C, H, W)
+        x = x.permute(0, 2, 1).reshape(B, C, H_grid, W_grid)
         return x
 
 class CustomFCNHead(nn.Module):
@@ -219,7 +268,7 @@ class PrithviAdapter(BaseAdapter):
         head = CustomFCNHead(
             in_channels=head_params.get('in_channels', 768),
             channels=head_params.get('channels', 256),
-            num_classes=head_params.get('num_classes', 2)
+            num_classes=head_params.get('num_classes', 2) # Will be 14 from config
         )
         
         model = PrithviSegmentor(backbone, head)
@@ -254,19 +303,39 @@ class PrithviAdapter(BaseAdapter):
         # Flexible Loading (Strict=False allows ignoring aux heads if they exist in weights but not our model)
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         if missing:
-            log.debug(f"Missing keys during load (expected for aux heads): {len(missing)}")
+            critical_missing = [k for k in missing if "patch_embed" in k or "backbone" in k]
+            if critical_missing:
+                log.warning(f"CRITICAL: Missing keys during load: {len(critical_missing)}. Examples: {critical_missing[:5]}")
+                log.warning("If patch_embed is missing, the model will output random garbage (one color).")
+            else:
+                log.debug(f"Missing keys during load (expected for aux heads): {len(missing)}")
         
         model.to(device)
         
         # 4. Prepare Wrapper
         means = self.params.get('means', [0.0] * 6)
         stds = self.params.get('stds', [1.0] * 6)
-        norm_m = torch.tensor(means, dtype=torch.float32).view(len(means), 1, 1)
-        norm_s = torch.tensor(stds, dtype=torch.float32).view(len(stds), 1, 1)
+        
+        # Adjust normalization shape for Temporal (5D) vs Static (4D)
+        # 5D: (B, C, T, H, W) -> Norm shape (C, 1, 1, 1)
+        # 4D: (B, C, H, W)    -> Norm shape (C, 1, 1)
+        
+        num_frames = backbone_params.get('num_frames', 1)
+        if num_frames > 1:
+             norm_shape = (len(means), 1, 1, 1)
+        else:
+             norm_shape = (len(means), 1, 1)
+
+        norm_m = torch.tensor(means, dtype=torch.float32).view(norm_shape)
+        norm_s = torch.tensor(stds, dtype=torch.float32).view(norm_shape)
         
         batch_size = self.params.get('batch_size', 8)
         if batch_size == "auto":
-            input_shape = (self.num_bands, self.patch_size, self.patch_size)
+            if num_frames > 1:
+                input_shape = (self.num_bands, num_frames, self.patch_size, self.patch_size)
+            else:
+                input_shape = (self.num_bands, self.patch_size, self.patch_size)
+                
             batch_size = estimate_optimal_batch_size(model, input_shape, device)
             print(f"Auto-configured batch size: {batch_size}")
 
@@ -292,6 +361,16 @@ class PrithviAdapter(BaseAdapter):
              s2_data = s2_data.astype(np.float32) / 10000.0
         
         patches, coords, H_crop, W_crop, _ = cut_into_patches(s2_data, self.patch_size, stride=self.stride)
+        
+        # Handle Temporal Replication
+        backbone_params = self.params.get('backbone_params', {})
+        num_frames = backbone_params.get('num_frames', 1)
+        
+        if num_frames > 1:
+            # patches is (N, C, H, W)
+            # expand to (N, C, T, H, W)
+            patches = np.expand_dims(patches, axis=2) # (N, C, 1, H, W)
+            patches = np.repeat(patches, num_frames, axis=2) # (N, C, T, H, W)
         
         metadata = {
             'coords': coords, 'H_crop': H_crop, 'W_crop': W_crop,
@@ -321,7 +400,10 @@ class PrithviAdapter(BaseAdapter):
         }
 
     @property
-    def num_classes(self) -> int: return 2
+    def num_classes(self) -> int: 
+        # distinct from head_params, or derived from it
+        head_params = self.params.get('head_params', {})
+        return head_params.get('num_classes', 2)
 
     @property
     def num_bands(self) -> int:
@@ -337,8 +419,9 @@ class PrithviAdapter(BaseAdapter):
     def is_segmentation(self) -> bool: return True
 
     @property
-    def labels(self) -> List[str]: return ["Non-Flood", "Flood"]
+    def labels(self) -> List[str]: 
+        return self.params.get('labels', [f"Class_{i}" for i in range(self.num_classes)])
 
     @property
     def color_map(self) -> Dict[str, Any]:
-        return {"Non-Flood": [0, 0, 0], "Flood": [0, 0, 255]}
+        return self.params.get('color_map', {label: [np.random.randint(0,255) for _ in range(3)] for label in self.labels})

@@ -45,11 +45,3 @@ class MetadataReporter(BaseReporter):
                 json.dump(class_map, f)
         except Exception as e:
             log.error(f"Failed to write classmap.json: {e}")
-
-        # 2. Generate Viewer
-        try:
-            # generate_single_node_viewer expects (tile_id, base_dir)
-            # base_dir is the PARENT of the specific tile output folder
-            generate_single_node_viewer(tile_name, str(output_path.parent))
-        except Exception as e:
-            log.error(f"Failed to generate viewer: {e}")

@@ -39,7 +39,6 @@
 \contentsline {subsection}{\numberline {4.2.3}Partition of Unity and Flux Conservation}{16}{subsection.4.2.3}%
 \contentsline {section}{\numberline {4.3}Uncertainty Quantification}{16}{section.4.3}%
 \contentsline {subsection}{\numberline {4.3.1}Shannon Entropy}{17}{subsection.4.3.1}%
-\contentsline {subsection}{\numberline {4.3.2}Prediction Gap}{17}{subsection.4.3.2}%
 \contentsline {chapter}{\numberline {5}Evaluation}{18}{chapter.5}%
 \contentsline {section}{\numberline {5.1}Experimental Setup}{18}{section.5.1}%
 \contentsline {subsection}{\numberline {5.1.1}Validated Hardware Specifications}{18}{subsection.5.1.1}%

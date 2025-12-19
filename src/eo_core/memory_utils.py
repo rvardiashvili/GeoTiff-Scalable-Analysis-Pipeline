@@ -141,7 +141,7 @@ def resolve_zor(zor_config: Union[int, str], halo: int, patch_size: int = 120, *
             print(f"⚠️ Invalid ZoR config, defaulting to {patch_size * 10}")
             return patch_size * 10
 
-def estimate_optimal_batch_size(model: torch.nn.Module, input_shape: Tuple[int, ...], device: torch.device, safety_factor: float = 0.80) -> int:
+def estimate_optimal_batch_size(model: torch.nn.Module, input_shape: Tuple[int, ...], device: torch.device, safety_factor: float = 0.40) -> int:
     """
     Estimates the optimal batch size for the given model and input shape by binary search
     or heuristic to fill GPU memory.
@@ -150,7 +150,7 @@ def estimate_optimal_batch_size(model: torch.nn.Module, input_shape: Tuple[int, 
         model: The PyTorch model (should be on 'device').
         input_shape: Shape of a SINGLE sample (C, H, W) or (C, T, H, W).
         device: The target device.
-        safety_factor: Fraction of available memory to use (default 0.85).
+        safety_factor: Fraction of available memory to use (default 0.40).
         
     Returns:
         Recommended batch size (int).
@@ -158,12 +158,15 @@ def estimate_optimal_batch_size(model: torch.nn.Module, input_shape: Tuple[int, 
     if device.type == 'cpu':
         return 16 # Conservative default for CPU
         
-    log.info("🧠 Starting Binary Search for Optimal Batch Size...")
+    log.info(f"🧠 Starting Binary Search for Optimal Batch Size (Safety={safety_factor:.2f})...")
     
     # Binary Search Parameters
     low = 1
-    high = 512 # Hard cap
+    high = 256 # Reduced hard cap from 512 to 256 for stability
     optimal_bs = 1
+    
+    # Get Total Memory
+    total_mem = torch.cuda.get_device_properties(device).total_memory
     
     # Move model to device
     model.to(device)
@@ -183,15 +186,24 @@ def estimate_optimal_batch_size(model: torch.nn.Module, input_shape: Tuple[int, 
                 
                 # Clean previous run
                 torch.cuda.empty_cache()
+                torch.cuda.reset_peak_memory_stats(device) # Reset stats to capture this run's peak
                 
                 # Dry Run
                 with torch.no_grad():
                      _ = model(dummy_input)
                 
-                # If we are here, it worked
-                optimal_bs = mid
-                low = mid + 1
-                # log.debug(f"Batch {mid}: OK")
+                # Check PEAK Memory Usage
+                # current_alloc = torch.cuda.memory_allocated(device) -> only shows end state
+                peak_alloc = torch.cuda.max_memory_allocated(device)
+                
+                if peak_alloc > (total_mem * safety_factor):
+                    # log.debug(f"Batch {mid}: Fits but PEAK usage exceeds safety margin ({peak_alloc/1e9:.2f}GB > {total_mem*safety_factor/1e9:.2f}GB)")
+                    high = mid - 1
+                else:
+                    # It works and is safe
+                    optimal_bs = mid
+                    low = mid + 1
+                    # log.debug(f"Batch {mid}: OK")
                 
             except RuntimeError as e:
                 if "out of memory" in str(e):
@@ -201,13 +213,10 @@ def estimate_optimal_batch_size(model: torch.nn.Module, input_shape: Tuple[int, 
                     # Some other error? Re-raise
                     raise e
                     
-        # Apply Safety Factor
-        # We found the absolute maximum 'mid' that didn't crash.
-        # Now we back off slightly to account for fragmentation during long runs.
-        final_bs = int(optimal_bs * safety_factor)
-        final_bs = max(1, final_bs)
+        # Final result is already safe due to the check inside the loop
+        final_bs = max(1, optimal_bs)
         
-        log.info(f"🧠 Binary Search Result: MaxBS={optimal_bs} -> SafeBS={final_bs} (Safety={safety_factor})")
+        log.info(f"🧠 Binary Search Result: SafeBS={final_bs}")
         
         return final_bs
         

@@ -4,6 +4,9 @@ import os
 import sys
 import logging
 
+# Set PyTorch Memory Config to reduce fragmentation
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 

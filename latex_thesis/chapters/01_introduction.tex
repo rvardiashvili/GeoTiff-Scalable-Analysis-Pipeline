@@ -3,15 +3,17 @@
 
 \section{Context: The Era of Big Earth Data and AI}
 
-The field of Earth Observation (EO) is currently undergoing a paradigm shift driven by the exponential growth of open satellite data. The European Space Agency’s (ESA) Copernicus programme, specifically the Sentinel constellation, generates approximately 10-12 terabytes of high-resolution imagery daily. Sentinel-2 alone, with its 10-meter spatial resolution and 5-day revisit time, provides a continuously updating digital twin of the Earth's surface. This data deluge has transformed Remote Sensing from a discipline of manual interpretation and sparse data analysis into a domain of "Big Data," where the limiting factor is no longer data acquisition but data processing.
+The field of Earth Observation (\EO) is currently undergoing a paradigm shift driven by the exponential growth of open satellite data. The European Space Agency’s (ESA) Copernicus programme, specifically the Sentinel constellation, generates approximately 10-12 terabytes of high-resolution imagery daily \cite{copernicus2023report}. Sentinel-2 alone, with its 10-meter spatial resolution and 5-day revisit time, provides a continuously updating digital twin of the Earth's surface. This data deluge has transformed Remote Sensing from a discipline of manual interpretation and sparse data analysis into a domain of "Big Data," where the limiting factor is no longer data acquisition but data processing.
 
-Concurrently, the rise of Deep Learning (DL), particularly Convolutional Neural Networks (CNNs) and Vision Transformers (ViTs), has revolutionized computer vision. The transition from "feature engineering" (e.g., Random Forests on manually calculated indices like NDVI) to "feature learning" has enabled unprecedented accuracy in complex tasks. Most recently, the emergence of \textbf{Foundation Models}---large-scale pre-trained backbones such as the IBM/NASA Prithvi model---promises to generalize across diverse geographies and seasons, offering "off-the-shelf" intelligence for semantic segmentation, land cover classification, and change detection. However, a significant engineering gap remains between the availability of these sophisticated models and their operational deployment on the massive scale of satellite archives.
+Concurrently, the rise of Deep Learning (DL), particularly Convolutional Neural Networks (\CNNs) and Vision Transformers (\ViTs), has revolutionized computer vision. The transition from "feature engineering" (e.g., Random Forests on manually calculated indices like NDVI) to "feature learning" has enabled unprecedented accuracy in complex tasks.
+
+Most recently, the emergence of \textbf{Foundation Models}---large-scale pre-trained backbones such as the IBM/NASA Prithvi model---promises to generalize across diverse geographies and seasons, offering "off-the-shelf" intelligence for semantic segmentation, land cover classification, and change detection. However, a significant engineering gap remains between the availability of these sophisticated models and their operational deployment on the massive scale of satellite archives.
 
 The traditional workflow of downloading images to a local workstation, processing them with a GUI-based tool (like QGIS or SNAP), and uploading the results is fundamentally unscalable in the petabyte era. We are witnessing a transition towards "Cloud-Native" processing, where code moves to data. Yet, the actual \textit{inference engines}---the software components responsible for executing the neural networks---are often ad-hoc scripts that lack the robustness required for production environments.
 
 \section{Problem Statement: The Logical vs. Physical Mismatch}
 
-The central challenge addressed in this thesis is the fundamental mismatch between the logical view of EO data and the physical constraints of modern computing hardware.
+The central challenge addressed in this thesis is the fundamental mismatch between the logical view of \EO data and the physical constraints of modern computing hardware.
 
 \subsection{The Logical View: Continuous Fields}
 Logically, a scientist views a satellite product (e.g., a Sentinel-2 tile or a country-wide mosaic) as a single, continuous function $f(x, y, t)$ over a spatial domain $\Omega$. They seek to apply a learned operator---the neural network---to this domain to derive semantic insights (e.g., $g(x) = \text{flood\_risk}$). The domain is theoretically infinite; a river does not stop at the edge of a JPEG file.
@@ -26,26 +28,26 @@ This is just for the input. Intermediate activation maps in a deep U-Net can eas
 Modern GPU accelerators, while powerful, are bound by relatively scarce Video Random Access Memory (VRAM), typically ranging from 16GB (Consumer) to 80GB (Data Center). This necessitates the partitioning of the domain into smaller, manageable sub-units.
 
 \subsection{The "CV Bias" and Grid Artifacts}
-The standard approach in Computer Vision---resizing images to fixed dimensions like $224 \times 224$ (ImageNet standard)---is inapplicable in EO. In a photograph of a cat, resizing reduces the file size while preserving the semantic content (the cat). In satellite imagery, pixel resolution corresponds to physical ground sampling distance (GSD). Resizing a 10m/pixel image to fit a neural network effectively destroys the small-scale features (roads, buildings, streams) that the model is supposed to detect.
+The standard approach in Computer Vision---resizing images to fixed dimensions like $224 \times 224$ (ImageNet standard)---is inapplicable in \EO. In a photograph of a cat, resizing reduces the file size while preserving the semantic content (the cat).
 
-Consequently, "tiling" or "patching" becomes mandatory. Yet, naive tiling introduces severe discontinuities at patch boundaries, known as "grid artifacts." These arise because Convolutional Neural Networks lose spatial context at the edges of their input (the Zero-Padding problem). When these independent tiles are stitched back together, the result is a checkerboard pattern of discontinuities. These artifacts render the resulting probability maps scientifically invalid for downstream applications such as hydrological modeling, where a continuous river network is essential.
+In satellite imagery, pixel resolution corresponds to physical ground sampling distance (GSD). Resizing a 10m/pixel image to fit a neural network effectively destroys the small-scale features (roads, buildings, streams) that the model is supposed to detect. Consequently, "tiling" or "patching" becomes mandatory. Yet, naive tiling introduces severe discontinuities at patch boundaries, known as "grid artifacts." These arise because Convolutional Neural Networks (\CNNs) lose spatial context at the edges of their input (the Zero-Padding problem). When these independent tiles are stitched back together, the result is a checkerboard pattern of discontinuities. These artifacts render the resulting probability maps scientifically invalid for downstream applications such as hydrological modeling, where a continuous river network is essential.
 
 \section{Research Objectives}
 
-This thesis proposes the \textbf{GeoSpatial Inference Pipeline (GSIP)}, a high-performance computing framework designed to bridge the gap between deep learning research and operational earth observation. The primary research objectives are:
+This thesis proposes the \textbf{GeoSpatial Inference Pipeline} (\GSIP), a high-performance computing framework designed to bridge the gap between deep learning research and operational earth observation. The primary research objectives are:
 
 \begin{enumerate}
-    \item \textbf{Formalization of Patch-Based Inference:} To define a mathematically rigorous framework for the decomposition and reconstruction of tensor fields that guarantees $C^1$ continuity and eliminates edge effects through probabilistic soft-voting mechanisms (Sinusoidal Weighting).
+    \item \textbf{Formalization of Patch-Based Inference:} To define a mathematically rigorous framework for the decomposition and reconstruction of tensor fields that aims to ensure $C^1$ continuity and mitigates edge effects through probabilistic soft-voting mechanisms (Sinusoidal Weighting).
     \item \textbf{Scalable and Agnostic Architecture:} To design a modular system architecture that decouples the underlying tiling logic from the specific machine learning model. Utilizing an \textbf{Adapter Pattern}, the system must support diverse architectures---from legacy ResNets to modern Vision Transformers (Prithvi)---without modification to the core engine.
-    \item \textbf{Memory-Aware Computing:} To develop a dynamic resource management algorithm, the \textbf{Zone of Responsibility (ZoR)}, which estimates optimal data chunk sizes based on real-time hardware profiling. This ensures the system can process gigapixel-scale images on consumer-grade hardware without Out-Of-Memory (OOM) crashes, democratizing access to high-end EO analysis.
+    \item \textbf{Memory-Aware Computing:} To develop a dynamic resource management algorithm, the \textbf{Zone of Responsibility (ZoR)}, which estimates optimal data chunk sizes based on real-time hardware profiling. This ensures the system can process gigapixel-scale images on consumer-grade hardware without Out-Of-Memory (OOM) crashes, democratizing access to high-end \EO analysis.
 \end{enumerate}
 
 \section{Thesis Structure}
 
 The remainder of this thesis is organized as follows:
 \begin{itemize}
-    \item \textbf{Chapter \ref{ch:theoretical_background}} provides the theoretical background on Datacubes, the OGC standards, and the specific challenges of the "Effective Receptive Field" in CNNs. It also reviews related work in tiling strategies.
-    \item \textbf{Chapter \ref{ch:methodology}} details the system architecture of GSIP, focusing on the Producer-Consumer multiprocessing model and the Zone of Responsibility algorithm.
+    \item \textbf{Chapter \ref{ch:theoretical_background}} provides the theoretical background on Datacubes, the OGC standards, and the specific challenges of the "Effective Receptive Field" in \CNNs{}. It also reviews related work in tiling strategies.
+    \item \textbf{Chapter \ref{ch:methodology}} details the system architecture of \GSIP{}, focusing on the Producer-Consumer multiprocessing model and the Zone of Responsibility algorithm.
     \item \textbf{Chapter \ref{ch:algorithmic_solution}} presents the core algorithmic contribution: the mathematical formulation of the seamless reconstruction strategy using 2D window functions.
     \item \textbf{Chapter \ref{ch:evaluation}} evaluates the system's performance, offering quantitative benchmarks on throughput and memory stability.
     \item \textbf{Chapter \ref{ch:discussion}} discusses the implications for integrating such inference engines into Array Databases like Rasdaman as User Defined Functions (UDFs).
@@ -54,5 +56,5 @@ The remainder of this thesis is organized as follows:
 
 \section{Code Availability}
 
-The core source code for the GeoSpatial Inference Pipeline (GSIP), including the adapter implementations and memory management logic, is open-source and available at:
+The core source code for the GeoSpatial Inference Pipeline (\GSIP{}), including the adapter implementations and memory management logic, is open-source and available at:
 \url{https://github.com/rvardiashvili/GSIP}

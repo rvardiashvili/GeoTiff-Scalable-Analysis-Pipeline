@@ -6,7 +6,7 @@
 The fundamental algorithmic contribution of this work is the rigorous implementation of the \textbf{Overlap-Tile Strategy} to solve the problem of Grid Artifacts.
 
 \subsection{The Need for Overlap}
-As established in Chapter \ref{ch:theoretical_background}, the Effective Receptive Field (ERF) of a CNN decays towards the edges. If we tile an image with zero overlap, pixels at the boundary $\partial P_i$ are predicted using only partial information (padded zeros). This results in predictions that are statistically distinct from those at the center, creating visible seams.
+As established in Chapter \ref{ch:theoretical_background}, the Effective Receptive Field (ERF) of a \CNNs{} decays towards the edges. If we tile an image with zero overlap, pixels at the boundary $\partial P_i$ are predicted using only partial information (padded zeros). This results in predictions that are statistically distinct from those at the center, creating visible seams.
 
 We define the tiling parameters:
 \begin{itemize}
@@ -19,9 +19,11 @@ This 50\% overlap ensures that every pixel in the valid output domain $\Omega'$ 
 
 \section{Probabilistic Aggregation: Sinusoidal Weighting}
 
-Ideally, we want to discard the "weak" predictions made at the patch edges and retain the "strong" predictions made at the patch centers. A simple arithmetic mean $\frac{1}{N}\sum y_i$ fails to do this; it dilutes the good center prediction with the bad edge prediction. Linearly weighted blending (triangular windows) is an improvement but suffers from discontinuities in the first derivative at the peak, which can still be visible as subtle artifacts in gradient-based downstream applications (e.g., edge detection).
+Ideally, we want to discard the "weak" predictions made at the patch edges and retain the "strong" predictions made at the patch centers. A simple arithmetic mean $\frac{1}{N}\sum y_i$ fails to do this; it dilutes the good center prediction with the bad edge prediction.
 
-We employ a \textbf{Soft-Voting} mechanism using a 2D \textbf{Hann Window} (Squared Sine), which guarantees higher-order continuity.
+Linearly weighted blending (triangular windows) is an improvement but suffers from discontinuities in the first derivative at the peak, which can still be visible as subtle artifacts in gradient-based downstream applications (e.g., edge detection).
+
+We employ a \textbf{Soft-Voting} mechanism using a 2D \textbf{Hann Window} (Squared Sine), which ensures higher-order continuity.
 
 \subsection{The 2D Hann Window}
 We define a 1D window function $w(t)$ for a domain $t \in [0, P-1]$:
@@ -70,21 +72,29 @@ When extended to the 2D stride of $P/2$, this ensures that the denominator $\sum
     \item \textbf{Contrast with Linear:} Linear blending creates a "pyramid" shape. The sum is constant, but the derivative is discontinuous at the peaks.
 \end{itemize}
 
-GSIP's use of Sinusoidal Weighting ensures that the output probability map is not only continuous but also smooth, preventing any "banding" artifacts in derived products.
+\GSIP{}'s use of Sinusoidal Weighting ensures that the output probability map is not only continuous but also smooth, preventing any "banding" artifacts in derived products.
 
 \section{Uncertainty Quantification}
 
 A distinct advantage of this probabilistic aggregation is that it allows us to quantify \textbf{Epistemic Uncertainty}. Since we hold an ensemble of $N=4$ predictions for every pixel, we can measure the \textit{disagreement} between these predictions.
 
 \subsection{Shannon Entropy}
-We compute the pixel-wise Entropy $H$ on the aggregated probability distribution:
+We compute the pixel-wise Entropy $H$ on the aggregated probability distribution. To align with the standard implementation in scientific computing libraries (NumPy, PyTorch), we utilize the \textbf{natural logarithm} ($\ln$):
 \[
-    H(x) = - \sum_{c=1}^{C} p_c(x) \log_2 (p_c(x) + \epsilon)
+    H(x) = - \sum_{c=1}^{C} p_c(x) \ln (p_c(x) + \epsilon)
 \]
 \begin{itemize}
     \item \textbf{Interpretation:}
     \begin{itemize}
-        \item \textbf{Low Entropy ($H \to 0$):} The model is confident (e.g., center of a deep lake).
-        \item \textbf{High Entropy ($H \to \log_2(C)$):} The model is uniformly confused (e.g., cloud edges, mixed pixels).
+        \item \textbf{Low Entropy ($H \to 0$):} The model is confident.
+        \item \textbf{High Entropy ($H \to \ln(C)$):} The model is uniformly confused.
     \end{itemize}
 \end{itemize}
+
+\subsection{Prediction Gap}
+\[
+    Gap = P_{top1} - P_{top2}
+\]
+This metric measures the margin of safety. A small gap (e.g., 0.05) indicates the model is “on the fence” between two classes (e.g., distinguishing “Forest” from “Dense Shrubland”).
+
+These uncertainty maps are exported alongside the class predictions. In a decision-support context (e.g., flood response), an analyst can use the Entropy map to mask out unreliable areas, a capability not provided by standard “Argmax” inference scripts.

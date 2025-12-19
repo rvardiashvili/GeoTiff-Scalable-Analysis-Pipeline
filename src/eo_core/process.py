@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 
 from importlib import import_module
 
-def writer_process(q: mp.Queue, context_config: Dict[str, Any], zor: int, halo: int, W_full: int, H_full: int, total_chunks: int, patch_size: int, adapter: Any, reporter_configs: Any):
+def writer_process(q: mp.Queue, context_config: Dict[str, Any], zor: int, halo: int, W_full: int, H_full: int, total_chunks: int, patch_size: int, adapter: Any, reporter_configs: Any, benchmark_report_path: Optional[str] = None):
     """
     Independent process to reconstruct map and delegate writing to Reporters.
     """
@@ -75,7 +75,8 @@ def writer_process(q: mp.Queue, context_config: Dict[str, Any], zor: int, halo: 
         'adapter': adapter,
         'config': context_config['hydra_config'],
         'H_full': H_full,
-        'W_full': W_full
+        'W_full': W_full,
+        'benchmark_report_path': benchmark_report_path # Added benchmark report path
     }
     
     # 1. Start Reporters
@@ -191,6 +192,12 @@ def writer_process(q: mp.Queue, context_config: Dict[str, Any], zor: int, halo: 
                 r.on_finish(context)
             except Exception as e:
                 log.error(f"Error in {r.__class__.__name__}.on_finish: {e}")
+        
+        # 4. Generate Viewer (After all reporters are done)
+        try:
+            generate_single_node_viewer(context['tile_name'], str(context['output_path'].parent))
+        except Exception as e:
+            log.error(f"Failed to generate viewer: {e}")
                 
     log.info(f"Writer process finished in {time.perf_counter() - t_process_start:.2f}s")
 
@@ -379,7 +386,7 @@ def main_hydra(cfg: DictConfig):
     
     writer_p = ctx.Process(
         target=writer_process,
-        args=(write_queue, context_config, zor, halo, W_full, H_full, total_chunks, patch_size, engine.adapter, reporter_configs),
+        args=(write_queue, context_config, zor, halo, W_full, H_full, total_chunks, patch_size, engine.adapter, reporter_configs, context_config.get('benchmark_report_path')),
         daemon=True
     )
     writer_p.start()
@@ -509,7 +516,11 @@ def main_hydra(cfg: DictConfig):
         
     finally:
         benchmarker.stop()
-        benchmarker.save_report()
+        benchmark_report_path = benchmarker.save_report() # Capture the filename
+        
+        # Add benchmark report path to context_config for the writer process
+        context_config['benchmark_report_path'] = str(benchmark_report_path)
+
         if writer_p.is_alive():
             write_queue.put(None)
             writer_p.join()

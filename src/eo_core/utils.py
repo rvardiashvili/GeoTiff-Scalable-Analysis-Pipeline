@@ -6,7 +6,10 @@ from pathlib import Path
 import numpy as np
 import torch
 from PIL import Image 
-from scipy.ndimage import zoom 
+from scipy.ndimage import zoom
+import matplotlib.pyplot as plt # Added
+import matplotlib.cm as cm # Added 
+import matplotlib.colors as colors # Added 
 
 # ----------------------------------------------------------------------
 # --- Constants & Helpers ---
@@ -110,3 +113,64 @@ def generate_low_res_preview(
         # print(f"  Saved preview to {output_path.name}")
     except Exception as e:
         print(f"❌ Error saving preview image: {e}")
+
+def generate_float_preview(
+    data: np.ndarray,
+    output_path: Path,
+    save_preview: bool = True,
+    downscale_factor: int = 10,
+    cmap_name: str = 'magma_r', # Default colormap for continuous data
+    title: Optional[str] = None, # Not used for image but could be useful for debugging
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    colorbar_path: Optional[Path] = None # New parameter for color bar output
+):
+    """
+    Generates a low-resolution color PNG preview of continuous float data, and optionally a color bar.
+    """
+    if not save_preview:
+        return
+
+    if downscale_factor > 1:
+        downscaled_data = zoom(data, 1.0 / downscale_factor, order=1) # order=1 for bilinear interpolation
+    else:
+        downscaled_data = data
+    
+    # Normalize data
+    if vmin is None:
+        vmin = np.min(downscaled_data)
+    if vmax is None:
+        vmax = np.max(downscaled_data)
+
+    if vmax == vmin: # Handle constant data
+        normalized_data = np.zeros_like(downscaled_data)
+    else:
+        normalized_data = (downscaled_data - vmin) / (vmax - vmin)
+    
+    # Apply colormap
+    cmap = cm.get_cmap(cmap_name)
+    rgb_image = cmap(normalized_data)[:, :, :3] # Take RGB channels, discard alpha
+    
+    # Convert to 8-bit image
+    rgb_image = (rgb_image * 255).astype(np.uint8)
+
+    try:
+        img_pil = Image.fromarray(rgb_image, 'RGB')
+        img_pil.save(output_path, 'PNG')
+    except Exception as e:
+        print(f"❌ Error saving float preview image: {e}")
+
+    # Generate color bar if requested
+    if colorbar_path:
+        try:
+            fig, ax = plt.subplots(figsize=(1.0, 4.0)) # Adjust size as needed
+            cmap_obj = cm.get_cmap(cmap_name)
+            norm = colors.Normalize(vmin=vmin, vmax=vmax)
+            cb = plt.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap_obj), cax=ax, orientation='vertical')
+            cb.set_label(title if title else "") # Use title for colorbar label
+            
+            plt.tight_layout()
+            plt.savefig(colorbar_path, bbox_inches='tight', dpi=100)
+            plt.close(fig) # Close the figure to free memory
+        except Exception as e:
+            print(f"❌ Error saving color bar image: {e}")
