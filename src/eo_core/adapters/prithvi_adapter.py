@@ -343,7 +343,7 @@ class PrithviAdapter(BaseAdapter):
 
     def preprocess(self, raw_input: Dict[str, Any]) -> Tuple[np.ndarray, Dict[str, Any]]:
         t_start = time.perf_counter()
-        tile_folder = Path(raw_input['tile_folder'])
+        tile_folder = raw_input['tile_folder'] # Can be Path or List[Path]
         r = raw_input['r_start']
         c = raw_input['c_start']
         w = raw_input['w_read']
@@ -353,6 +353,13 @@ class PrithviAdapter(BaseAdapter):
         bands_needed = self.params.get('bands', ['B02', 'B03', 'B04', 'B8A', 'B11', 'B12'])
         s2_pattern = self.params.get('s2_file_pattern', "S2*.SAFE/**/*{band_name}*.jp2")
         
+        # Handle Path vs List[Path] manually if needed, but _read_s2_bands_for_chunk handles it.
+        # Just ensure tile_folder is passed correctly.
+        if isinstance(tile_folder, str):
+             tile_folder = Path(tile_folder)
+        elif isinstance(tile_folder, list):
+             tile_folder = [Path(p) if isinstance(p, str) else p for p in tile_folder]
+
         s2_data, _, _, _ = _read_s2_bands_for_chunk(
             tile_folder, r, c, w, h, s2_pattern=s2_pattern, pad_if_needed=True, bands_list=bands_needed
         )
@@ -361,20 +368,54 @@ class PrithviAdapter(BaseAdapter):
              s2_data = s2_data.astype(np.float32) / 10000.0
         
         patches, coords, H_crop, W_crop, _ = cut_into_patches(s2_data, self.patch_size, stride=self.stride)
+        # patches shape: (N, Channels_Stacked, H, W)
         
-        # Handle Temporal Replication
+        # Handle Temporal Dimension
         backbone_params = self.params.get('backbone_params', {})
         num_frames = backbone_params.get('num_frames', 1)
+        num_bands = len(bands_needed)
         
-        if num_frames > 1:
-            # patches is (N, C, H, W)
-            # expand to (N, C, T, H, W)
+        current_channels = patches.shape[1]
+        
+        if current_channels == num_bands and num_frames > 1:
+            # Case 1: Single Image Input, Model expects Time Series -> REPLICATE
+            # patches: (N, C, H, W) -> (N, C, T, H, W)
             patches = np.expand_dims(patches, axis=2) # (N, C, 1, H, W)
             patches = np.repeat(patches, num_frames, axis=2) # (N, C, T, H, W)
-        
+            
+        elif current_channels > num_bands:
+            # Case 2: Multi-Temporal Input (Real Data)
+            # patches: (N, T*C, H, W) -> Reshape to (N, C, T, H, W)
+            # Note: _read_s2 stacks as T1_C1, T1_C2... T2_C1... if recursive?
+            # Wait, my `_read_s2` implementation:
+            # for folder: data = read(C,H,W); stack.append(data)
+            # concat(stack, axis=0) -> (T*C, H, W) structure:
+            # [T1_B1, T1_B2... T1_B6, T2_B1... T2_B6, ...]
+            # So channel dimension is T*C.
+            # We want (C, T).
+            # Current flat layout: T is outer block, C is inner.
+            # Reshape to (N, T, C, H, W)
+            real_T = current_channels // num_bands
+            patches = patches.reshape(patches.shape[0], real_T, num_bands, self.patch_size, self.patch_size)
+            # Permute to (N, C, T, H, W)
+            patches = patches.transpose(0, 2, 1, 3, 4)
+            
+            # If loaded T != num_frames, handle mismatch?
+            if real_T != num_frames:
+                log.warning(f"Input time steps ({real_T}) != Model expected ({num_frames}). Truncating/Padding.")
+                if real_T > num_frames:
+                    patches = patches[:, :, :num_frames, :, :]
+                else:
+                    # Pad by repeating last frame
+                    diff = num_frames - real_T
+                    last_frame = patches[:, :, -1:, :, :]
+                    padding = np.repeat(last_frame, diff, axis=2)
+                    patches = np.concatenate([patches, padding], axis=2)
+
         metadata = {
             'coords': coords, 'H_crop': H_crop, 'W_crop': W_crop,
-            'original_r': r, 'original_c': c, 'shape': s2_data.shape
+            'original_r': r, 'original_c': c, 'shape': s2_data.shape,
+            'original_folder': tile_folder if not isinstance(tile_folder, list) else tile_folder[0]
         }
         return patches, metadata
 

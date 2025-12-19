@@ -256,7 +256,7 @@ def _read_s1_bands_for_chunk(
     return np.stack(band_data_list, axis=0), ret_crs, ret_transform
 
 def _read_s2_bands_for_chunk(
-    tile_folder: Path,
+    tile_folder: Union[Path, List[Path]],
     r_start: int, 
     c_start: int, 
     W_chunk: int, 
@@ -268,9 +268,38 @@ def _read_s2_bands_for_chunk(
 ) -> Tuple[np.ndarray, Any, Any, Tuple[int, int]]:
     """
     Reads a single chunk (sub-window) from all required bands for a tile.
-    It automatically uses the resolution of 'B02' as the reference and resamples
-    all other bands to match it on-the-fly.
+    Can handle a single tile path or a list of tile paths (Multi-Temporal).
+    If a list is provided, bands are stacked along the channel dimension.
     """
+    # --- Multi-Temporal Logic ---
+    if isinstance(tile_folder, list):
+        if not tile_folder:
+            raise ValueError("Empty tile_folder list provided.")
+        
+        # Use the first tile as the spatial reference
+        ref_tile = tile_folder[0]
+        
+        # Read all time steps
+        stacked_data = []
+        ref_crs, ref_transform, ref_size = None, None, None
+        
+        for i, folder in enumerate(tile_folder):
+            # Recursive call for single time step
+            data, crs, transform, size = _read_s2_bands_for_chunk(
+                folder, r_start, c_start, W_chunk, H_chunk, 
+                s2_pattern, pad_if_needed, target_size, bands_list
+            )
+            stacked_data.append(data)
+            
+            if i == 0:
+                ref_crs, ref_transform, ref_size = crs, transform, size
+        
+        # Concatenate along channel axis (0) -> (T*C, H, W)
+        final_data = np.concatenate(stacked_data, axis=0)
+        return final_data, ref_crs, ref_transform, ref_size
+
+    # --- Single Time Step Logic ---
+    # tile_folder is a single Path object here
     band_data_list = []
     
     if bands_list is None:
@@ -373,13 +402,16 @@ def _read_s2_bands_for_chunk(
 
     return np.stack(band_data_list, axis=0), ref_crs, ref_transform, ref_size
 
-def read_chunk_data(tile_folder: Path, bands_list: List[str], r_start: int, c_start: int, W_chunk: int, H_chunk: int, s2_pattern: str, s1_pattern: str = None, use_sentinel_1: bool = False) -> np.ndarray:
+def read_chunk_data(tile_folder: Union[Path, List[Path]], bands_list: List[str], r_start: int, c_start: int, W_chunk: int, H_chunk: int, s2_pattern: str, s1_pattern: str = None, use_sentinel_1: bool = False) -> np.ndarray:
     """
     Public wrapper to read a single chunk of Sentinel-2 data.
     """
     s2_data, s2_crs, s2_transform, s2_size = _read_s2_bands_for_chunk(tile_folder, r_start, c_start, W_chunk, H_chunk, s2_pattern=s2_pattern, bands_list=bands_list)
     
     if use_sentinel_1:
+        if isinstance(tile_folder, list):
+             raise NotImplementedError("Multi-temporal Sentinel-1 not yet supported in this wrapper.")
+             
         if not s1_pattern:
              raise ValueError("s1_pattern is required when use_sentinel_1 is True")
         

@@ -50,9 +50,13 @@ def search_products(access_token, aoi_wkt, start_date, end_date, collection, ext
     )
     filter_parts = [
         f"Collection/Name eq '{collection}'",
-        f"OData.CSC.Intersects(area=geography'SRID=4326;{aoi_wkt}')",
         f"ContentDate/Start ge {start_date} and ContentDate/End le {end_date}"
     ]
+    
+    # Only add spatial filter if aoi_wkt is provided
+    if aoi_wkt:
+        filter_parts.append(f"OData.CSC.Intersects(area=geography'SRID=4326;{aoi_wkt}')")
+        
     if extra_filters:
         filter_parts.append(extra_filters)
 
@@ -170,6 +174,10 @@ def main():
     parser.add_argument("--s2_tile_id", type=str, help="Specify a Sentinel-2 tile ID (e.g., 32UQC) to use as the AOI.")
     parser.add_argument("--only_s2", action="store_true", help="Only download Sentinel-2 products, skip Sentinel-1 pair search.")
     
+    # Multi-temporal arguments
+    parser.add_argument("--multi_temporal", action="store_true", help="Download a time series of Sentinel-2 images.")
+    parser.add_argument("--max_images", type=int, default=3, help="Maximum number of images to download for multi-temporal series.")
+    
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -177,6 +185,151 @@ def main():
     try:
         access_token = get_access_token(args.username, args.password)
         print("Access token obtained.")
+
+        # --- Multi-Temporal Download Logic ---
+        if args.multi_temporal:
+            selected_products = []
+            
+            # Case A: Target S2 Name provided (Smart phenological search)
+            if args.target_s2_name:
+                print(f"Searching for reference product: {args.target_s2_name}...")
+                name_filter = f"Name eq '{args.target_s2_name}'"
+                # No AOI needed for name search
+                ref_products = search_products(access_token, None, "2020-01-01T00:00:00.000Z", "2030-01-01T00:00:00.000Z", 'SENTINEL-2', extra_filters=name_filter)
+                
+                if not ref_products:
+                    print(f"Reference product {args.target_s2_name} not found.")
+                    return
+                
+                ref_prod = ref_products[0]
+                ref_date = datetime.strptime(ref_prod['ContentDate']['Start'], '%Y-%m-%dT%H:%M:%S.%fZ')
+                
+                # Extract Tile ID from attributes if possible, or assume user provided it? 
+                # Better to get from product attributes.
+                tile_id = None
+                for attr in ref_prod['Attributes']:
+                    if attr['Name'] == 'mgrsTile':
+                        tile_id = attr['Value']
+                        break
+                
+                if not tile_id:
+                    print("Could not determine Tile ID from reference product. Please provide --s2_tile_id manually if needed, or check product metadata.")
+                    # Fallback to args.s2_tile_id if available
+                    tile_id = args.s2_tile_id
+                
+                if not tile_id:
+                    print("Aborting: Tile ID missing.")
+                    return
+
+                print(f"Reference Date: {ref_date.date()}, Tile: {tile_id}")
+                print(f"Selecting {args.max_images} images spaced ~30 days apart...")
+                
+                # Always include the reference product first
+                selected_products.append(ref_prod)
+                
+                # Find previous time steps
+                for i in range(1, args.max_images):
+                    target_date = ref_date - timedelta(days=30 * i)
+                    s_start = (target_date - timedelta(days=10)).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+                    s_end = (target_date + timedelta(days=10)).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+                    
+                    print(f"  Step {i}: Looking around {target_date.date()} ({s_start} to {s_end})...")
+                    
+                    # Simplify API Filter: Use Name contains logic instead of complex Attributes
+                    # Filename format: S2A_MSIL2A_..._T32UNE_...
+                    # We search for 'MSIL2A' (Product Type) and 'T{tile_id}' (Tile ID)
+                    
+                    s2_filter_parts = [
+                        f"contains(Name, 'MSIL2A')",
+                        f"contains(Name, 'T{tile_id}')"
+                    ]
+                    s2_filter = " and ".join(s2_filter_parts)
+                    
+                    # No AOI needed if filtering by Tile ID in Name
+                    step_products = search_products(access_token, None, s_start, s_end, 'SENTINEL-2', extra_filters=s2_filter)
+                    
+                    # Client-side Cloud Filtering
+                    def get_cloud(p):
+                        for a in p['Attributes']:
+                            if a['Name'] == 'cloudCover': return a['Value']
+                        return 100.0
+
+                    if step_products:
+                        # Filter by max cloud cover
+                        valid_products = [p for p in step_products if get_cloud(p) < args.cloud_cover]
+                        
+                        if valid_products:
+                            # Sort by cloud cover (best first)
+                            valid_products.sort(key=get_cloud)
+                            best = valid_products[0]
+                            print(f"    Found match: {best['Name']} (Cloud: {get_cloud(best)}%)")
+                            selected_products.append(best)
+                        else:
+                            print(f"    Found {len(step_products)} images, but none met cloud criteria (< {args.cloud_cover}%).")
+                    else:
+                        print(f"    No L2A images found near {target_date.date()}. Skipping.")
+
+                # Reverse to be chronological (Oldest -> Newest)
+                selected_products.reverse()
+
+            # Case B: General Search (Original Logic)
+            elif args.s2_tile_id:
+                print(f"Searching for Sentinel-2 time series for tile {args.s2_tile_id}...")
+                
+                s2_filter_parts = [
+                    f"Attributes/OData.CSC.DoubleAttribute/any(a:a/Name eq 'cloudCover' and a/Value lt {args.cloud_cover})",
+                    f"Attributes/OData.CSC.StringAttribute/any(a:a/Name eq 'productType' and a/Value eq 'S2MSI2A')",
+                    f"Attributes/OData.CSC.StringAttribute/any(a:a/Name eq 'mgrsTile' and a/Value eq '{args.s2_tile_id}')"
+                ]
+                s2_filter = " and ".join(s2_filter_parts)
+                
+                # Search
+                s2_products = search_products(access_token, args.aoi, args.start_date, args.end_date, 'SENTINEL-2', extra_filters=s2_filter)
+                
+                if not s2_products:
+                    print("No matching Sentinel-2 products found.")
+                    return
+                    
+                # Sort by Date
+                s2_products.sort(key=lambda p: p['ContentDate']['Start'])
+                
+                print(f"Found {len(s2_products)} candidate images. Selecting {args.max_images}...")
+                
+                if len(s2_products) <= args.max_images:
+                    selected_products = s2_products
+                else:
+                    selected_products = s2_products[:args.max_images]
+            else:
+                print("Error: Either --target_s2_name or --s2_tile_id must be provided for multi-temporal download.")
+                return
+                
+            # Create Series Directory
+            if not selected_products:
+                print("No products selected.")
+                return
+
+            series_name = f"S2_Series_{selected_products[0]['ContentDate']['Start'][:10]}_{selected_products[-1]['ContentDate']['Start'][:10]}"
+            # Append Tile ID if available
+            tile_id_str = args.s2_tile_id if args.s2_tile_id else "Series"
+            series_name = f"{tile_id_str}_Series_{selected_products[0]['ContentDate']['Start'][:10]}_{selected_products[-1]['ContentDate']['Start'][:10]}"
+            
+            series_dir = os.path.join(args.output_dir, series_name)
+            os.makedirs(series_dir, exist_ok=True)
+            
+            print(f"Downloading series to: {series_dir}")
+            
+            for prod in selected_products:
+                name = prod['Name']
+                pid = prod['Id']
+                date = prod['ContentDate']['Start']
+                print(f"Downloading {name} ({date})...")
+                try:
+                    download_product(access_token, pid, name, series_dir)
+                except Exception as e:
+                    print(f"Failed to download {name}: {e}")
+                    
+            print(f"✅ Multi-temporal series download complete: {series_dir}")
+            return
 
         # Handle specific product downloads if names are provided
         if args.s1_product_name:
@@ -240,29 +393,45 @@ def main():
                 print("Error: When --s2_tile_id is provided, --aoi must also be explicitly provided with the WKT for that tile.")
                 return
             
+            # Simplified Filter Construction
             s2_filter_l2a_parts = [
-                f"Attributes/OData.CSC.DoubleAttribute/any(a:a/Name eq 'cloudCover' and a/Value lt {args.cloud_cover})",
-                f"Attributes/OData.CSC.StringAttribute/any(a:a/Name eq 'productType' and a/Value eq 'S2MSI2A')"
+                f"contains(Name, 'MSIL2A')"
             ]
+            
+            # Use Name contains for Tile ID if provided (Robuster than Attribute filter)
             if args.s2_tile_id:
-                s2_filter_l2a_parts.append(f"Attributes/OData.CSC.StringAttribute/any(a:a/Name eq 'mgrsTile' and a/Value eq '{args.s2_tile_id}')")
-            s2_filter = " and ".join(s2_filter_l2a_parts) # Renamed filter variable to be consistent
+                s2_filter_l2a_parts.append(f"contains(Name, 'T{args.s2_tile_id}')")
+                
+            s2_filter = " and ".join(s2_filter_l2a_parts)
             
             print("Searching for Sentinel-2 products (pair search mode)...")
-            s2_products = search_products(access_token, args.aoi, args.start_date, args.end_date, 'SENTINEL-2', extra_filters=s2_filter)
-            print(f"Found {len(s2_products)} Sentinel-2 products.")
+            
+            # If filtering by Tile ID, AOI might be redundant/problematic for API if complex.
+            # But general search usually needs AOI.
+            # Let's try passing None for AOI if Tile ID is present, assuming Tile ID is sufficient spatial filter.
+            search_aoi = None if args.s2_tile_id else args.aoi
+            
+            s2_products = search_products(access_token, search_aoi, args.start_date, args.end_date, 'SENTINEL-2', extra_filters=s2_filter)
+            
+            # Client-side Cloud Filtering
+            def get_cloud_cover(product):
+                for attr in product['Attributes']:
+                    if attr['Name'] == 'cloudCover':
+                        return attr['Value']
+                return 100.0
+
+            if s2_products:
+                # Filter by cloud cover
+                s2_products = [p for p in s2_products if get_cloud_cover(p) < args.cloud_cover]
+                print(f"Found {len(s2_products)} Sentinel-2 products matching criteria.")
+            else:
+                print("No products found (before cloud filtering).")
 
             if not s2_products:
                 print("No low-cloud Sentinel-2 products found for pair search.")
                 return
 
             # Sort by cloud cover ascending
-            def get_cloud_cover(product):
-                for attr in product['Attributes']:
-                    if attr['Name'] == 'cloudCover':
-                        return attr['Value']
-                return 100.0
-                
             s2_products.sort(key=get_cloud_cover)
 
             s2_products_to_process = []

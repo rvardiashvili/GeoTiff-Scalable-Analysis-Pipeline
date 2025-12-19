@@ -214,11 +214,48 @@ def main_hydra(cfg: DictConfig):
     output_path.mkdir(parents=True, exist_ok=True)
     
     log.info(f"Processing tile: {tile_path}")
+    
+    # --- Input Path Handling & Series Detection ---
+    input_is_series = False
+    tile_paths_list = []
+    
+    # Check Model Requirement for Temporal Depth
+    # Safe access to num_frames, defaulting to 1 if not present
+    model_num_frames = OmegaConf.select(cfg, "model.adapter.params.backbone_params.num_frames", default=1)
+    if model_num_frames is None: model_num_frames = 1 # Handle explicit None
+    
+    if tile_path.name.endswith('.SAFE'):
+        # Direct path to a single product
+        log.info("Processing as Single Product (Direct Path).")
+        ref_tile_path = tile_path
+    else:
+        # Directory containing products?
+        sub_tiles = sorted(list(tile_path.glob("*.SAFE")))
+        s2_sub_tiles = [p for p in sub_tiles if p.name.startswith('S2')]
+        
+        if len(s2_sub_tiles) > 1 and model_num_frames > 1:
+            log.info(f"Detected Multi-Temporal S2 Series ({len(s2_sub_tiles)} frames) for Temporal Model (req: {model_num_frames}).")
+            input_is_series = True
+            tile_paths_list = s2_sub_tiles
+            ref_tile_path = s2_sub_tiles[0] # Use first as reference
+        elif len(s2_sub_tiles) == 1:
+            log.info("Detected Single S2 Product in directory.")
+            ref_tile_path = s2_sub_tiles[0]
+        else:
+            # Fallback: maybe S1 only or just a folder structure we interpret as "the tile"
+            # Or Multi-S2 but Model is Single-Frame (ambiguous, default to container path or first?)
+            if len(s2_sub_tiles) > 1:
+                 log.warning(f"Found {len(s2_sub_tiles)} S2 products but model is Single-Frame. Using first product as target.")
+                 ref_tile_path = s2_sub_tiles[0]
+            else:
+                 log.info("No multiple S2 products found. Treating directory as tile root.")
+                 ref_tile_path = tile_path
+
     log.info(f"Output directory: {output_path}")
     
-    # Get Tile Dimensions
+    # Get Tile Dimensions (from reference)
     s2_pattern = cfg.data_source.get('s2_file_pattern', "S2*.SAFE/**/*{band_name}*.jp2")
-    ref_path = _find_band_path(tile_path, 'B02', s2_pattern)
+    ref_path = _find_band_path(ref_tile_path, 'B02', s2_pattern)
     with rasterio.open(ref_path) as src:
         H_full, W_full = src.shape
         profile = src.profile.copy()
@@ -420,7 +457,7 @@ def main_hydra(cfg: DictConfig):
             h_read = zor + (2 * halo)
             
             raw_input = {
-                'tile_folder': tile_path,
+                'tile_folder': tile_paths_list if input_is_series else tile_path,
                 'r_start': r_read,
                 'c_start': c_read,
                 'w_read': w_read,

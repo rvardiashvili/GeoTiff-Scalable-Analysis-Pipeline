@@ -17,4 +17,4 @@ psutil
 pandas
 safetensors
 timm
-pynvml
+nvidia-ml-py
