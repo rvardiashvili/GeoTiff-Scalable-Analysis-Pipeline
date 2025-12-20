@@ -261,7 +261,7 @@ def _read_s2_bands_for_chunk(
     c_start: int, 
     W_chunk: int, 
     H_chunk: int,
-    s2_pattern: str,
+    s2_base_pattern: str,
     pad_if_needed: bool = False,
     target_size: Optional[Tuple[int, int]] = None,
     bands_list: Optional[List[str]] = None
@@ -286,8 +286,8 @@ def _read_s2_bands_for_chunk(
         for i, folder in enumerate(tile_folder):
             # Recursive call for single time step
             data, crs, transform, size = _read_s2_bands_for_chunk(
-                folder, r_start, c_start, W_chunk, H_chunk, 
-                s2_pattern, pad_if_needed, target_size, bands_list
+                folder, r_start, c_start, W_chunk, H_chunk,
+                s2_base_pattern, pad_if_needed, target_size, bands_list
             )
             stacked_data.append(data)
             
@@ -305,23 +305,41 @@ def _read_s2_bands_for_chunk(
     if bands_list is None:
          raise ValueError("BANDS list cannot be None.")
     
-    if not s2_pattern:
-         raise ValueError("s2_pattern is required for reading Sentinel-2 data.")
+    if not s2_base_pattern:
+         raise ValueError("s2_base_pattern is required for reading Sentinel-2 data.")
 
     s2_bands = [b for b in bands_list if b not in ['VV', 'VH']]
-    ref_band_name = 'B02' 
+    ref_band_name = 'B02' # Try B02 as primary reference
 
-    ref_band_path = _find_band_path(tile_folder, ref_band_name, s2_pattern)
-    if not ref_band_path:
+    PRIORITIZED_RESOLUTIONS = ["10", "20", "60"]
+    
+    overall_reference_resolution = None
+    ref_band_path_for_georef = None
+    
+    # Try to find a reference band (B02) at prioritized resolutions to establish overall georeferencing
+    for res in PRIORITIZED_RESOLUTIONS:
+        current_s2_pattern = s2_base_pattern.format(resolution=res, band_name=ref_band_name)
+        ref_band_path_for_georef = _find_band_path(tile_folder, ref_band_name, current_s2_pattern)
+        if ref_band_path_for_georef:
+            overall_reference_resolution = res
+            break
+            
+    if not ref_band_path_for_georef: # If B02 not found, try with first available band for georef
         if not s2_bands:
-            raise ValueError("BANDS list is empty.")
-        ref_band_name = s2_bands[0]
-        ref_band_path = _find_band_path(tile_folder, ref_band_name, s2_pattern)
-        if not ref_band_path:
-             raise FileNotFoundError(f"Missing reference band file for {ref_band_name} using pattern {s2_pattern}")
+            raise ValueError("BANDS list is empty and no reference band found for georeferencing.")
+        ref_band_name_fallback = s2_bands[0] # Use the first band in the list as reference
+        for res in PRIORITIZED_RESOLUTIONS:
+            current_s2_pattern = s2_base_pattern.format(resolution=res, band_name=ref_band_name_fallback)
+            ref_band_path_for_georef = _find_band_path(tile_folder, ref_band_name_fallback, current_s2_pattern)
+            if ref_band_path_for_georef:
+                overall_reference_resolution = res
+                break
 
-    # We keep the reference open to extract global tile info
-    with rasterio.open(ref_band_path) as ref_src:
+    if not ref_band_path_for_georef:
+        raise FileNotFoundError(f"Missing a suitable reference band for georeferencing (tried {ref_band_name} and {ref_band_name_fallback}) using pattern '{s2_base_pattern}' at any prioritized resolution.")
+    
+    # Open the reference band to extract global tile info (CRS, Transform, Size)
+    with rasterio.open(ref_band_path_for_georef) as ref_src:
         ref_res = ref_src.res
         ref_crs = ref_src.crs
         ref_transform = ref_src.transform
@@ -338,75 +356,101 @@ def _read_s2_bands_for_chunk(
         if proc_baseline >= 400:
             offset = -1000.0
     
+    # Now, read each band individually, finding its best resolution and reprojecting to the overall_reference_resolution
     for band_name in s2_bands:
-        band_path = _find_band_path(tile_folder, band_name, s2_pattern)
+        band_path = None
+        found_res_for_this_band = None
+        
+        # Try to find this specific band at prioritized resolutions
+        for res in PRIORITIZED_RESOLUTIONS:
+            current_s2_pattern = s2_base_pattern.format(resolution=res, band_name=band_name)
+            band_path = _find_band_path(tile_folder, band_name, current_s2_pattern)
+            if band_path:
+                found_res_for_this_band = res
+                break # Found the highest available resolution for this band
+        
         if not band_path:
-            raise FileNotFoundError(f"Missing required band file: {band_name}")
+            raise FileNotFoundError(f"Missing required band file: {band_name} at any prioritized resolution ({', '.join(PRIORITIZED_RESOLUTIONS)}).")
 
         with rasterio.open(band_path) as src:
-            # Unified logic for both same-res and diff-res bands
-            scale_x = src.res[0] / ref_res[0]
-            scale_y = src.res[1] / ref_res[1]
+            # Determine the intersection of the requested chunk with the full image bounds
+            full_image_height = ref_size[0]
+            full_image_width = ref_size[1]
 
-            target_img_h = int(src.height * scale_y)
-            target_img_w = int(src.width * scale_x)
+            # Calculate intersection in global image coordinates
+            valid_r_start_global = max(0, r_start)
+            valid_c_start_global = max(0, c_start)
+            valid_r_end_global = min(full_image_height, r_start + H_chunk)
+            valid_c_end_global = min(full_image_width, c_start + W_chunk)
+            
+            valid_height = valid_r_end_global - valid_r_start_global
+            valid_width = valid_c_end_global - valid_c_start_global
 
-            valid_c_start = max(0, c_start)
-            valid_r_start = max(0, r_start)
-            valid_c_end = min(c_start + W_chunk, target_img_w)
-            valid_r_end = min(r_start + H_chunk, target_img_h)
+            # Initialize final band data array (H_chunk x W_chunk)
+            band_data_final = np.zeros((H_chunk, W_chunk), dtype=np.float32)
 
-            valid_w = valid_c_end - valid_c_start
-            valid_h = valid_r_end - valid_r_start
+            if valid_height > 0 and valid_width > 0:
+                # Define destination window and transform for the valid intersection only
+                dst_window_valid_global = Window(valid_c_start_global, valid_r_start_global, valid_width, valid_height)
+                dst_transform_valid_global = rasterio.windows.transform(dst_window_valid_global, ref_transform)
 
-            band_data = np.zeros((H_chunk, W_chunk), dtype=np.float32)
+                # Create a temporary array for just this valid, reprojected portion
+                valid_data_reprojected = np.zeros((valid_height, valid_width), dtype=np.float32)
 
-            if valid_w > 0 and valid_h > 0:
-                src_win_c = valid_c_start / scale_x
-                src_win_r = valid_r_start / scale_y
-                src_win_w = valid_w / scale_x
-                src_win_h = valid_h / scale_y
-                
-                window = Window(src_win_c, src_win_r, src_win_w, src_win_h)
-
-                valid_data = src.read(
-                    1,
-                    window=window,
-                    out_shape=(valid_h, valid_w),
-                    resampling=Resampling.nearest
+                # Perform reprojection into the temporary array
+                rasterio.warp.reproject(
+                    source=rasterio.band(src, 1),
+                    destination=valid_data_reprojected,
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=dst_transform_valid_global,
+                    dst_crs=ref_crs,
+                    resampling=Resampling.nearest, # Use nearest for classification, bilinear for continuous
+                    num_threads=1
                 )
                 
+                # Apply offset
                 if offset != 0.0:
-                    valid_data = valid_data.astype(np.float32)
-                    valid_data = np.maximum(valid_data + offset, 0)
+                    valid_data_reprojected = np.maximum(valid_data_reprojected + offset, 0)
 
-                # Convert to 0-1 Reflectance and ensure float32
-                valid_data = valid_data.astype(np.float32) / 10000.0
+                # Convert to 0-1 Reflectance
+                valid_data_reprojected = valid_data_reprojected.astype(np.float32) / 10000.0
 
-                dest_r = valid_r_start - r_start
-                dest_c = valid_c_start - c_start
-                band_data[dest_r:dest_r+valid_h, dest_c:dest_c+valid_w] = valid_data
+                # Calculate padding amounts needed to grow valid_data_reprojected to H_chunk x W_chunk
+                pad_top_amt = valid_r_start_global - r_start
+                pad_bottom_amt = (r_start + H_chunk) - valid_r_end_global
+                pad_left_amt = valid_c_start_global - c_start
+                pad_right_amt = (c_start + W_chunk) - valid_c_end_global
+                
+                # Ensure pad_width are non-negative for np.pad
+                pad_top_amt = max(0, pad_top_amt)
+                pad_bottom_amt = max(0, pad_bottom_amt)
+                pad_left_amt = max(0, pad_left_amt)
+                pad_right_amt = max(0, pad_right_amt)
 
-                if pad_if_needed:
-                    pad_top = dest_r
-                    pad_left = dest_c
-                    pad_bottom = H_chunk - (dest_r + valid_h)
-                    pad_right = W_chunk - (dest_c + valid_w)
-
-                    if pad_top > 0 or pad_left > 0 or pad_bottom > 0 or pad_right > 0:
-                        roi = band_data[dest_r:dest_r+valid_h, dest_c:dest_c+valid_w]
-                        padded_roi = np.pad(roi, ((pad_top, pad_bottom), (pad_left, pad_right)), mode='reflect')
-                        band_data = padded_roi
+                if pad_if_needed and (pad_top_amt > 0 or pad_bottom_amt > 0 or pad_left_amt > 0 or pad_right_amt > 0):
+                    band_data_final = np.pad(
+                        valid_data_reprojected,
+                        ((pad_top_amt, pad_bottom_amt), (pad_left_amt, pad_right_amt)),
+                        mode='reflect'
+                    )
+                else:
+                    # If no padding needed or pad_if_needed is False, place valid_data_reprojected directly
+                    # into band_data_final (which is already 0-filled)
+                    dest_r_in_final_chunk = valid_r_start_global - r_start
+                    dest_c_in_final_chunk = valid_c_start_global - c_start
+                    band_data_final[dest_r_in_final_chunk:dest_r_in_final_chunk+valid_height, 
+                                    dest_c_in_final_chunk:dest_c_in_final_chunk+valid_width] = valid_data_reprojected
             
-            band_data_list.append(band_data.astype(np.float32))
+            band_data_list.append(band_data_final)
 
     return np.stack(band_data_list, axis=0), ref_crs, ref_transform, ref_size
 
-def read_chunk_data(tile_folder: Union[Path, List[Path]], bands_list: List[str], r_start: int, c_start: int, W_chunk: int, H_chunk: int, s2_pattern: str, s1_pattern: str = None, use_sentinel_1: bool = False) -> np.ndarray:
+def read_chunk_data(tile_folder: Union[Path, List[Path]], bands_list: List[str], r_start: int, c_start: int, W_chunk: int, H_chunk: int, s2_base_pattern: str, s1_pattern: str = None, use_sentinel_1: bool = False) -> np.ndarray:
     """
     Public wrapper to read a single chunk of Sentinel-2 data.
     """
-    s2_data, s2_crs, s2_transform, s2_size = _read_s2_bands_for_chunk(tile_folder, r_start, c_start, W_chunk, H_chunk, s2_pattern=s2_pattern, bands_list=bands_list)
+    s2_data, s2_crs, s2_transform, s2_size = _read_s2_bands_for_chunk(tile_folder, r_start, c_start, W_chunk, H_chunk, s2_base_pattern=s2_base_pattern, bands_list=bands_list)
     
     if use_sentinel_1:
         if isinstance(tile_folder, list):

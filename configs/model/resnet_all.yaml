@@ -23,7 +23,7 @@ model:
       ]
       
       patch_size: 120
-      stride: 120
+      stride: 60
       batch_size: "auto"
 pipeline:
   output:

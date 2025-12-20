@@ -202,7 +202,7 @@ class BigEarthNetAdapter(BaseAdapter):
         s2_bands = [b for b in bands if 'B' in b]
         s2_pattern = self.params.get('s2_file_pattern', "S2*.SAFE/**/*{band_name}*.jp2")
         s2_data, s2_crs, s2_transform, s2_size = _read_s2_bands_for_chunk(
-            tile_folder, r, c, w, h, s2_pattern=s2_pattern, pad_if_needed=True, bands_list=s2_bands
+            tile_folder, r, c, w, h, s2_base_pattern=s2_pattern, pad_if_needed=True, bands_list=s2_bands
         )
         
         # S1 Data

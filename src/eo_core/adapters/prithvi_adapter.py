@@ -361,7 +361,7 @@ class PrithviAdapter(BaseAdapter):
              tile_folder = [Path(p) if isinstance(p, str) else p for p in tile_folder]
 
         s2_data, _, _, _ = _read_s2_bands_for_chunk(
-            tile_folder, r, c, w, h, s2_pattern=s2_pattern, pad_if_needed=True, bands_list=bands_needed
+            tile_folder, r, c, w, h, s2_base_pattern=s2_pattern, pad_if_needed=True, bands_list=bands_needed
         )
         
         if s2_data.max() > 100:

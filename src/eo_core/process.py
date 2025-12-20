@@ -15,6 +15,7 @@ from typing import Tuple, List, Optional, Dict, Any
 from omegaconf import DictConfig, OmegaConf, ListConfig
 import hydra
 from tqdm import tqdm
+import re
 
 # Import new inference engine
 from .inference_engine import InferenceEngine
@@ -235,6 +236,12 @@ def main_hydra(cfg: DictConfig):
         
         if len(s2_sub_tiles) > 1 and model_num_frames > 1:
             log.info(f"Detected Multi-Temporal S2 Series ({len(s2_sub_tiles)} frames) for Temporal Model (req: {model_num_frames}).")
+            
+            # Extract and log dates for multi-temporal series
+            s2_files = []
+            for p in s2_sub_tiles:
+                s2_files.append(p.name)
+                log.info(f"Detected S2 series file: {', '.join(s2_files)}")
             input_is_series = True
             tile_paths_list = s2_sub_tiles
             ref_tile_path = s2_sub_tiles[0] # Use first as reference
@@ -254,8 +261,11 @@ def main_hydra(cfg: DictConfig):
     log.info(f"Output directory: {output_path}")
     
     # Get Tile Dimensions (from reference)
-    s2_pattern = cfg.data_source.get('s2_file_pattern', "S2*.SAFE/**/*{band_name}*.jp2")
-    ref_path = _find_band_path(ref_tile_path, 'B02', s2_pattern)
+    s2_file_pattern = cfg.data_source.s2_file_pattern
+    # For initial ref_path determination, we use a dummy resolution.
+    # The actual band reading will handle prioritization.
+    temp_s2_pattern_for_ref = s2_file_pattern.format(resolution="10", band_name="{band_name}")
+    ref_path = _find_band_path(ref_tile_path, 'B02', temp_s2_pattern_for_ref)
     with rasterio.open(ref_path) as src:
         H_full, W_full = src.shape
         profile = src.profile.copy()

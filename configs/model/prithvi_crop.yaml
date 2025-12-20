@@ -27,8 +27,8 @@ model:
       # Let's stick to the Prithvi Standard: 
       # If these means are ~500, they are definitely DNs (0-10000).
       
-      means: [0.049, 0.081, 0.092, 0.296, 0.263, 0.173] 
-      stds:  [0.028, 0.035, 0.057, 0.089, 0.095, 0.092]
+      means: [0.0492, 0.0763, 0.0886, 0.2844, 0.2227, 0.1415] 
+      stds:  [0.0468, 0.0503, 0.0734, 0.1245, 0.1102, 0.0885]
       
       patch_size: 224
       stride: 112
