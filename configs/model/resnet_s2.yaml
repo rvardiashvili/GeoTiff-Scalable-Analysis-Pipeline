@@ -17,7 +17,7 @@ model:
       stds: [0.0572, 0.0582, 0.0675, 0.0729, 0.1096, 0.1273, 0.1365, 0.1356, 0.0836, 0.0818]
       
       patch_size: 120
-      stride: 60
+      stride: 60a
       batch_size: "auto"
 pipeline:
   output:

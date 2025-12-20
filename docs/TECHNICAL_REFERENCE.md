@@ -125,7 +125,7 @@ For each tile coordinate $(r, c)$:
 
 ---
 
-## 4. End-to-End Pipeline Workflow: From Configuration to Output
+## 4. End-to-End Pipeline Workflow: Detailed Data Flow and Function Calls
 
 This section provides a comprehensive walk-through of the GeoSpatial Inference Pipeline (GSIP), detailing the entire data flow from the initial configuration and entry point to the final output generation. It highlights the key functions and modules involved in each stage.
 

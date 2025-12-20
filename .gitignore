@@ -116,3 +116,5 @@ thesis_drafts/
 # Project Specific Output and Thesis
 latex_thesis/
 bremen_analyzed/
+
+local only/
